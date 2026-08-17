@@ -89,6 +89,15 @@ The UI has three tabs:
 
 4. The task list shows live progress and a status badge; you can inspect or re-run individual failed items.
 
+### Upload local video / audio
+Besides Bilibili links, the tool can also transcribe local media files you upload:
+
+1. In the **Upload local video / audio** area at the bottom of the Tasks tab, click **Choose file**.
+2. Supported formats: mp4 / mkv / mov / avi / webm / flv / wmv / mp3 / m4a / wav / ogg / opus / flac / aac.
+3. The file is first saved to the local `uploads/` directory, then transcribed by the same local pipeline used for Bilibili tasks, producing SRT / TXT / MD.
+
+> Note: Uploaded files are user assets and are **never deleted automatically** (only the intermediate WAV cache is cleaned). Re-uploading the same file/content skips already-completed jobs.
+
 ### History
 - Index of processed jobs and their output paths (stored in a local SQLite database).
 - Re-open output files or re-run jobs from here.

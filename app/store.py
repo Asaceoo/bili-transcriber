@@ -21,6 +21,7 @@ class Job:
     uploader: str
     duration: float
     url: str
+    source_type: str = "url"  # 'url' = B站链接;'local' = 本地上传文件
     part: int = 1
     total_parts: int = 1
     status: str = "queued"
@@ -74,6 +75,11 @@ class Store:
                 )
                 """
             )
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            if "source_type" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE jobs ADD COLUMN source_type TEXT NOT NULL DEFAULT 'url'"
+                )
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> Job:
@@ -83,17 +89,18 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute(
                 """
-                INSERT INTO jobs (media_id, bv, title, uploader, duration, url, part, total_parts,
+                INSERT INTO jobs (media_id, bv, title, uploader, duration, url, source_type, part, total_parts,
                                   status, progress, error, audio_path, srt_path, txt_path, md_path,
                                   created_at, finished_at)
-                VALUES (:media_id, :bv, :title, :uploader, :duration, :url, :part, :total_parts,
+                VALUES (:media_id, :bv, :title, :uploader, :duration, :url, :source_type, :part, :total_parts,
                         :status, :progress, :error, :audio_path, :srt_path, :txt_path, :md_path,
                         :created_at, :finished_at)
                 ON CONFLICT(media_id) DO UPDATE SET
                     status=excluded.status, progress=excluded.progress, error=excluded.error,
                     audio_path=excluded.audio_path, srt_path=excluded.srt_path,
                     txt_path=excluded.txt_path, md_path=excluded.md_path,
-                    finished_at=excluded.finished_at, title=excluded.title, duration=excluded.duration
+                    finished_at=excluded.finished_at, title=excluded.title, duration=excluded.duration,
+                    source_type=excluded.source_type
                 """,
                 job.to_row(),
             )

@@ -162,3 +162,46 @@ def test_safe_delete_failure_keeps_job_done(env, monkeypatch):
     assert (out_dir / "管道测试.srt").exists()
     # 缓存因删除被拦而保留(预期行为)
     assert list((tmp / "cache").glob("*.wav"))
+
+
+def test_local_file_processing_skips_download_and_preserves_source(env, monkeypatch):
+    """本地上传文件:跳过下载阶段、下载器不被调用、产物生成、原文件保留。"""
+    pipe, store, settings, events, tmp = env
+    _fake_transcriber(pipe)
+    monkeypatch.setattr(pipe, "start", lambda: None)  # 同步验证,不启动后台线程
+
+    video = pipe.uploads_dir / "我的视频.mp4"
+    video.write_bytes(b"fake-video-bytes")
+    media_id = "local_" + pipe._local_hash(video)
+
+    pipe.submit_local(video)       # 入队 + 创建 job(下载器未参与)
+    pipe._process_local(media_id)  # 同步处理
+
+    job = store.get_job(media_id)
+    assert job is not None
+    assert job.source_type == "local"
+    assert job.uploader == "本地文件"
+    assert job.status == "done", job.error
+    assert pipe.downloader.probe_calls == 0  # 本地通道不调用下载器
+    out_dir = tmp / "out" / "我的视频"
+    assert (out_dir / "我的视频.srt").exists()
+    assert (out_dir / "我的视频.txt").exists()
+    assert (out_dir / "我的视频.md").exists()
+    assert video.exists(), "本地上传的原文件不应被删除"
+    assert any("完成" in e for e in events)
+
+
+def test_local_file_resubmit_skips_when_done(env, monkeypatch):
+    """已完成的本地任务再次上传应跳过,不重复处理。"""
+    pipe, store, _, events, tmp = env
+    _fake_transcriber(pipe)
+    monkeypatch.setattr(pipe, "start", lambda: None)
+
+    video = pipe.uploads_dir / "clip.mp4"
+    video.write_bytes(b"x")
+    media_id = "local_" + pipe._local_hash(video)
+    pipe.submit_local(video)
+    pipe._process_local(media_id)
+    events.clear()
+    pipe.submit_local(video)  # 已完成应跳过
+    assert any("跳过" in e for e in events)

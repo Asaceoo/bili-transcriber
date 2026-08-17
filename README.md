@@ -4,7 +4,7 @@
 
 **yt-dlp 下载音频 → FFmpeg 转码 → faster-whisper GPU 本地转写 → 输出 SRT / TXT / Markdown**
 
-纯本地处理,不上传任何数据。
+纯本地处理,不上传任何数据。除 B 站链接外,**也支持直接上传本地视频 / 音频文件**进行转写(数据不出本机)。
 
 ## 环境要求
 
@@ -32,6 +32,14 @@ python -m venv .venv
 ```powershell
 .venv\Scripts\bili-transcriber
 ```
+
+## 本地文件转写
+
+除粘贴 B 站链接外,在「任务」页下方的 **上传本地视频 / 音频** 区域可直接选择本地文件(支持 mp4 / mkv / mov / avi / webm / flv / wmv / mp3 / m4a / wav / ogg / opus / flac / aac)。文件上传到本机 `uploads/` 目录后,走与 B 站相同的本地转写流程,输出 SRT / TXT / MD。
+
+- 上传的文件**不会被删除**(属用户资产),仅清理中间的临时 WAV 缓存
+- 同名 / 同内容文件再次上传会自动跳过已完成的任务
+- 时长由 ffprobe(缺失时回退 ffmpeg)探测,用于界面展示
 
 ## 输出
 

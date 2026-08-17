@@ -111,6 +111,30 @@ def _rerun(media_id: str) -> None:
     ui.notify("已重新入队")
 
 
+def _on_upload(files) -> None:
+    """NiceGUI 上传回调:把文件写入 uploads 目录并入队本地转写。
+    兼容单文件(UploadEventArguments)与多文件(MultiUploadEventArguments)事件。"""
+    if not isinstance(files, (list, tuple)):
+        files = [files]
+    for f in files:
+        name = getattr(f, "name", "upload")
+        content = getattr(f, "content", None)
+        if not content and getattr(f, "path", None):
+            content = Path(f.path).read_bytes()
+        content = content or b""
+        if not content:
+            ui.notify(f"空文件,已跳过:{name}", type="warning")
+            continue
+        dest = pipeline.uploads_dir / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            from datetime import datetime as _dt
+            dest = dest.parent / f"{dest.stem}_{_dt.now().strftime('%H%M%S')}{dest.suffix}"
+        dest.write_bytes(content)
+        pipeline.submit_local(dest)
+        ui.notify(f"已上传并加入队列:{name}")
+
+
 def _reset_settings(out_input) -> None:
     for k, v in DEFAULT_SETTINGS.items():
         setattr(settings, k, v)
@@ -156,6 +180,15 @@ def main_page() -> None:
                     ui.button("添加任务", icon="add", on_click=submit)
 
                 log = ui.log(max_lines=100).classes("w-full h-40")
+
+            with ui.card().classes("w-full mt-4"):
+                ui.label("上传本地视频 / 音频(上传后本地转写,数据不出本机)").classes("font-medium")
+                ui.upload(
+                    label="选择文件(支持 mp4/mkv/mov/avi/webm/flv/wmv/mp3/m4a/wav/ogg/opus/flac/aac)",
+                    on_upload=_on_upload,
+                    auto_upload=True,
+                    multiple=True,
+                ).classes("w-full")
 
             ui.label("进行中的任务").classes("font-medium mt-4")
             active_table = ui.table(

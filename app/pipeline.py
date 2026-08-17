@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,14 @@ logger = logging.getLogger(__name__)
 UpdateCallback = lambda job: None  # noqa: E731  仅用于类型说明
 
 
+@dataclass
+class Task:
+    """队列任务描述符。kind 决定后续处理分支。"""
+    kind: str            # 'url' = B站链接;'local' = 本地上传文件
+    url: str = ""
+    media_id: str = ""
+
+
 class Pipeline:
     """单工作线程串行处理;下载/转写不会并发占用 GPU。"""
 
@@ -29,6 +38,8 @@ class Pipeline:
         self.settings = settings
         self.base_dir = base_dir
         self.cache_dir = base_dir / "cache"
+        self.uploads_dir = base_dir / "uploads"
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
         self.on_event = on_event  # (message: str) -> None,工作线程回调
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -51,8 +62,41 @@ class Pipeline:
         self._queue.put(None)
 
     def submit(self, url: str) -> None:
-        self._queue.put(url.strip())
+        self._queue.put(Task(kind="url", url=url.strip()))
         self.start()
+
+    def submit_local(self, path: Path) -> None:
+        """上传的本地文件:保存元数据并入队,跳过下载阶段。"""
+        path = Path(path)
+        if not path.exists():
+            self._emit(f"本地文件不存在:{path}")
+            return
+        self.uploads_dir.mkdir(parents=True, exist_ok=True)
+        media_id = "local_" + self._local_hash(path)
+        duration = converter.media_duration(path)
+        job = self.store.get_job(media_id)
+        if job and job.status == "done" and job.md_path and Path(job.md_path).exists():
+            self._emit(f"已存在,跳过:{job.title}")
+            return
+        job = job or Job(
+            media_id=media_id, bv="", title=path.stem, uploader="本地文件",
+            duration=duration, url="", source_type="local",
+        )
+        job.title, job.duration = path.stem, duration
+        job.audio_path = str(path)
+        job.status, job.progress, job.error, job.finished_at = "queued", 0.0, "", ""
+        self.store.upsert_job(job)
+        self._queue.put(Task(kind="local", media_id=media_id))
+        self.start()
+
+    @staticmethod
+    def _local_hash(path: Path) -> str:
+        import hashlib
+        h = hashlib.sha1()
+        h.update(str(path.resolve()).encode("utf-8"))
+        h.update(f"{path.stat().st_size}".encode("utf-8"))
+        h.update(f"{path.stat().st_mtime:.3f}".encode("utf-8"))
+        return h.hexdigest()
 
     @property
     def pending_count(self) -> int:
@@ -70,7 +114,11 @@ class Pipeline:
         job.error = ""
         job.finished_at = ""
         self.store.upsert_job(job)
-        self.submit(job.url)
+        if job.source_type == "local":
+            self._queue.put(Task(kind="local", media_id=media_id))
+            self.start()
+        else:
+            self.submit(job.url)
 
     # ---------- 内部 ----------
 
@@ -104,10 +152,13 @@ class Pipeline:
             if item is None:
                 break
             try:
-                self._process_url(item)
+                if item.kind == "url":
+                    self._process_url(item.url)
+                elif item.kind == "local":
+                    self._process_local(item.media_id)
             except Exception:
-                logger.exception("处理 URL 失败: %s", item)
-                self._emit(f"处理链接失败:{item}")
+                logger.exception("处理任务失败: %s", item)
+                self._emit(f"处理任务失败:{item}")
             finally:
                 self._queue.task_done()
 
@@ -141,9 +192,19 @@ class Pipeline:
                 self.store.upsert_job(job)
                 self._emit(f"失败:{job.title}({exc})")
 
+    def _process_local(self, media_id: str) -> None:
+        job = self.store.get_job(media_id)
+        if not job:
+            return
+        info = MediaInfo(
+            media_id=job.media_id, bv="", title=job.title, uploader=job.uploader,
+            duration=job.duration, url="", part=1, total_parts=1,
+        )
+        self._process_job(job, info)
+
     def _job_dir(self, info: MediaInfo) -> Path:
         folder = getattr(info, "playlist_title", "") or info.title
-        name = f"{info.bv}_{_safe_name(folder)}" if _safe_name(folder) else info.bv
+        name = _safe_name(folder) if not info.bv else f"{info.bv}_{_safe_name(folder)}"
         d = self.settings.resolve_output_dir(self.base_dir) / name
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -152,14 +213,19 @@ class Pipeline:
         job_dir = self._job_dir(info)
         wav = self.cache_dir / f"{_safe_name(info.media_id) or info.media_id}.wav"
 
-        # 1. 下载音频(已有则复用)
-        self._set_stage(job, "downloading")
-        audio = Path(job.audio_path) if job.audio_path and Path(job.audio_path).exists() else None
-        if audio is None:
-            audio = self.downloader.download_audio(
-                info, job_dir, progress=lambda p: self._set_stage(job, "downloading", p)
-            )
-        job.audio_path = str(audio)
+        # 1. 获取音频源(本地上传文件跳过下载阶段)
+        if job.source_type == "local":
+            audio = Path(job.audio_path) if job.audio_path and Path(job.audio_path).exists() else None
+            if audio is None:
+                raise FileNotFoundError(f"本地音频源缺失:{job.audio_path}")
+        else:
+            self._set_stage(job, "downloading")
+            audio = Path(job.audio_path) if job.audio_path and Path(job.audio_path).exists() else None
+            if audio is None:
+                audio = self.downloader.download_audio(
+                    info, job_dir, progress=lambda p: self._set_stage(job, "downloading", p)
+                )
+            job.audio_path = str(audio)
 
         # 2. 转码(已有 wav 则复用,支持断点续跑)
         if not wav.exists():
@@ -193,12 +259,13 @@ class Pipeline:
             wav.unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("清理中间 WAV 缓存失败（已忽略，文件保留）: %s | %s", wav, exc)
-        if not self.settings.keep_audio:
+        if not self.settings.keep_audio and job.source_type != "local":
             try:
                 audio.unlink(missing_ok=True)
                 job.audio_path = ""
             except OSError as exc:
                 logger.warning("清理原始音频缓存失败（已忽略，文件保留）: %s | %s", audio, exc)
+        # 本地上传文件属于用户资产,始终保持,不在此处删除
 
         job.status, job.progress = "done", 1.0
         job.finished_at = datetime.now().isoformat(timespec="seconds")
