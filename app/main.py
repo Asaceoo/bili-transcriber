@@ -326,24 +326,45 @@ def _has_webview2() -> bool:
     return False
 
 
+def _print_err(msg: str) -> None:
+    """向 stderr 输出诊断信息;PyInstaller 启动早期 sys.stderr 可能为 None。"""
+    try:
+        if sys.stderr is not None:
+            print(msg, file=sys.stderr)
+    except Exception:
+        pass
+
+
 def main() -> None:
-    use_native = True
+    # 默认走浏览器模式:pywebview 在 PyInstaller --onefile 解压环境下原生窗口会白屏,
+    # 且依赖目标机 WebView2 运行时;浏览器模式 100% 可靠(只要目标机装了任意浏览器)。
+    # 设 BILI_FORCE_NATIVE=1 可强制原生窗口(前提是 WebView2 已安装)。
+    use_native = False
     show = True
-    # 允许环境变量强制指定模式(便于测试/自动化场景)
-    if os.environ.get("BILI_FORCE_BROWSER"):
-        use_native = False
-    elif os.environ.get("BILI_FORCE_NATIVE"):
+    if os.environ.get("BILI_FORCE_NATIVE"):
         use_native = True
-    elif sys.platform == "win32" and not _has_webview2():
-        use_native = False
-        print(
-            "[bili-transcriber] 未检测到 Microsoft Edge WebView2 Runtime,"
-            "将使用浏览器模式启动。安装 WebView2 后可恢复原生窗口:"
-            "https://developer.microsoft.com/microsoft-edge/webview2/",
-            file=sys.stderr,
+        _print_err("[bili main] BILI_FORCE_NATIVE set, native window mode")
+    elif sys.platform == "win32" and _has_webview2():
+        # 检测到 WebView2 时仍给用户一个切换到原生的口子(便于高级用户)
+        # 默认仍走浏览器模式,只在显式 BILI_FORCE_NATIVE 时切
+        _print_err(
+            "[bili main] WebView2 detected but defaulting to browser mode. "
+            "Set BILI_FORCE_NATIVE=1 to use the native window."
+        )
+    elif sys.platform == "win32":
+        _print_err(
+            "[bili main] WebView2 not detected, browser mode forced. "
+            "Install WebView2 (https://developer.microsoft.com/microsoft-edge/webview2/) "
+            "and set BILI_FORCE_NATIVE=1 to use native window."
         )
     if os.environ.get("BILI_NO_BROWSER"):
         show = False
+    _print_err(
+        f"[bili main] BILI_FORCE_BROWSER={os.environ.get('BILI_FORCE_BROWSER')!r} "
+        f"BILI_FORCE_NATIVE={os.environ.get('BILI_FORCE_NATIVE')!r} "
+        f"BILI_NO_BROWSER={os.environ.get('BILI_NO_BROWSER')!r} "
+        f"use_native={use_native} show={show}"
+    )
     ui.run(
         title="B站音频本地转写",
         native=use_native,
