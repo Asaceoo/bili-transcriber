@@ -18,6 +18,7 @@
   python scripts/release.py                 # 完整流程(先 bump)
   python scripts/release.py --wheel-only    # bump + 构建 wheel(快速交付)
   python scripts/release.py --bin-only      # 仅便携版 + 安装包(假设版本已定)
+  python scripts/release.py --single-only   # 仅重建单文件便携版(假设版本已定)
 """
 from __future__ import annotations
 
@@ -164,7 +165,10 @@ def do_setup(ver: str) -> Path | None:
 def do_singlefile(ver: str) -> Path | None:
     """单文件便携版(CPU 模式):--onefile,不含 2GB CUDA DLL,体积小、可直接运行。"""
     spec = ROOT / "build" / "bili-transcriber-onefile.spec"
+    # 同 onedir:必须撤离 dist 输出与 build 工作目录,否则 PyInstaller --noconfirm
+    # 开头清理旧 build 目录时被 safe-delete 钩子拦死,构建在起始阶段即中止。
     _evacuate(DIST / "bili-transcriber-single.exe")
+    _evacuate(ROOT / "build" / "bili-transcriber-onefile")
     start = time.time()
     try:
         subprocess.run(
@@ -188,13 +192,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="bili-transcriber 一键发布")
     ap.add_argument("--wheel-only", action="store_true", help="bump + 构建 wheel(快速交付)")
     ap.add_argument("--bin-only", action="store_true", help="仅便携版 + 安装包(版本已定)")
+    ap.add_argument("--single-only", action="store_true", help="仅重建单文件便携版(版本已定,用于验证/复现)")
     args = ap.parse_args()
 
     DIST.mkdir(exist_ok=True)
 
-    if args.bin_only:
+    if args.bin_only or args.single_only:
         ver = read_version()
-        print(f"[release] bin-only: 使用现有版本 {ver}")
+        print(f"[release] {('bin-only' if args.bin_only else 'single-only')}: 使用现有版本 {ver}")
         whl: Path | None = None
     else:
         ver = do_bump()
@@ -203,6 +208,16 @@ def main() -> None:
 
     if args.wheel_only:
         print("[release] --wheel-only 完成")
+        return
+
+    if args.single_only:
+        single = do_singlefile(ver)
+        print("[release] ===== 产物清单 =====")
+        if single:
+            print(f"  {single.name} <- 单文件便携版")
+        else:
+            print("  !! 单文件便携版构建失败")
+        print(f"[release] 版本 {ver} 发布流程结束")
         return
 
     portable = do_portable(ver)
