@@ -10,6 +10,9 @@ from pathlib import Path
 
 from nicegui import ui
 
+if sys.platform == "win32":
+    import winreg
+
 from app import converter
 from app.downloader import Downloader
 from app.pipeline import Pipeline
@@ -299,14 +302,56 @@ def main_page() -> None:
     ui.timer(0.6, refresh)
 
 
+def _has_webview2() -> bool:
+    """检查 Windows 是否安装了 Microsoft Edge WebView2 Runtime。
+
+    pywebview 在 Windows 上默认使用 WebView2 渲染;若未安装,会静默回退到
+    MSHTML(IE),导致 NiceGUI 的 Vue 前端白屏。通过注册表键判断是否存在。
+    """
+    if sys.platform != "win32":
+        return False
+    # 每机安装通常在此键;也存在每用户安装路径,一并检查。
+    candidates = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"),
+    ]
+    for hkey, subkey in candidates:
+        try:
+            with winreg.OpenKey(hkey, subkey, 0, winreg.KEY_READ) as key:
+                pv, _ = winreg.QueryValueEx(key, "pv")
+                if pv:
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def main() -> None:
+    use_native = True
+    show = True
+    # 允许环境变量强制指定模式(便于测试/自动化场景)
+    if os.environ.get("BILI_FORCE_BROWSER"):
+        use_native = False
+    elif os.environ.get("BILI_FORCE_NATIVE"):
+        use_native = True
+    elif sys.platform == "win32" and not _has_webview2():
+        use_native = False
+        print(
+            "[bili-transcriber] 未检测到 Microsoft Edge WebView2 Runtime,"
+            "将使用浏览器模式启动。安装 WebView2 后可恢复原生窗口:"
+            "https://developer.microsoft.com/microsoft-edge/webview2/",
+            file=sys.stderr,
+        )
+    if os.environ.get("BILI_NO_BROWSER"):
+        show = False
     ui.run(
         title="B站音频本地转写",
-        native=True,
+        native=use_native,
         window_size=(980, 720),
         port=int(os.environ.get("BILI_PORT", "8765")),
         reload=False,
         favicon="🅑",
+        show=show,
     )
 
 

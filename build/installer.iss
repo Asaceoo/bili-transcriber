@@ -10,7 +10,7 @@
 [Setup]
 AppId={{B1A2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#AppName}
-AppVersion=0.1.6
+AppVersion=0.1.8
 AppPublisher={#AppPublisher}
 DefaultDirName={pf}\{#AppName}
 DefaultGroupName={#AppName}

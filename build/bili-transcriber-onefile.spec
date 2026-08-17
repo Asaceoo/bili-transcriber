@@ -72,7 +72,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(PROJECT / "build" / "onefile_browser.py")],
     excludes=[
         "tkinter", "matplotlib", "scipy", "PIL",
         "IPython", "jupyter", "notebook",

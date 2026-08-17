@@ -1,6 +1,6 @@
 [project]
 name = "bili-transcriber"
-version = "0.1.6"
+version = "0.1.8"
 description = "B站音频本地转写桌面工具:yt-dlp 下载 + faster-whisper GPU 转写,输出 SRT/TXT/Markdown"
 readme = "README.md"
 license = "MIT"
