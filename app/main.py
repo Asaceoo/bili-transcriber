@@ -118,7 +118,15 @@ async def _on_upload(e) -> None:
     FileUpload 没有顶层 .content 属性,内容需通过 file.save(path) 异步落盘。
     每个文件单独触发一次该回调(multiple=True 时逐个调用)。"""
     f = e.file
-    name = f.name or "upload"
+    # 防御路径穿越:客户端文件名可能含 ../ 或绝对路径片段,只取 basename 并剥离
+    # 非法字符,确保始终落在 uploads_dir 内,不会写到项目外部。
+    name = Path(f.name).name or "upload"
+    if name in (".", "..") or not name.strip("."):
+        name = "upload"
+    bad = '<>:"/\\|?*'
+    name = "".join("_" if ch in bad else ch for ch in name).strip().rstrip(".")
+    if not name:
+        name = "upload"
     dest = pipeline.uploads_dir / name
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():

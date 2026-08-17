@@ -5,7 +5,7 @@ import pytest
 import app.converter as converter
 from app.downloader import MediaInfo
 from app.pipeline import Pipeline
-from app.store import Settings, Store
+from app.store import Job, Settings, Store
 from app.transcriber import Segment
 
 INFO = MediaInfo(
@@ -183,12 +183,56 @@ def test_local_file_processing_skips_download_and_preserves_source(env, monkeypa
     assert job.uploader == "本地文件"
     assert job.status == "done", job.error
     assert pipe.downloader.probe_calls == 0  # 本地通道不调用下载器
-    out_dir = tmp / "out" / "我的视频"
+    out_dir = tmp / "out" / f"我的视频_{media_id}"
     assert (out_dir / "我的视频.srt").exists()
     assert (out_dir / "我的视频.txt").exists()
     assert (out_dir / "我的视频.md").exists()
     assert video.exists(), "本地上传的原文件不应被删除"
     assert any("完成" in e for e in events)
+
+
+def test_local_failure_marks_job_failed(env, monkeypatch):
+    """本地任务处理失败(源文件损坏/缺失/转写异常)必须落库为 failed,而非停在排队中。"""
+    pipe, store, settings, events, tmp = env
+    _fake_transcriber(pipe, fail=True)
+    monkeypatch.setattr(pipe, "start", lambda: None)
+
+    video = pipe.uploads_dir / "broken.mp4"
+    video.write_bytes(b"not-a-real-video")
+    media_id = "local_" + pipe._local_hash(video)
+    pipe.submit_local(video)
+    pipe._process_local(media_id)
+
+    job = store.get_job(media_id)
+    assert job.status == "failed", f"本地失败任务应标记 failed,实际: {job.status}"
+    assert "GPU 爆炸" in job.error
+    assert any("失败" in e for e in events)
+
+
+def test_url_rerun_of_dead_link_marks_failed(env, monkeypatch):
+    """rerun 已存在任务时若链接失效(probe 抛错),应把该任务标记 failed。"""
+    pipe, store, _, events, tmp = env
+    _fake_transcriber(pipe)
+
+    class DeadDownloader:
+        def probe(self, url):
+            from app.downloader import DownloadError
+            raise DownloadError("视频不存在或已下架")
+        def download_audio(self, *a, **k):
+            raise AssertionError("不应走到下载阶段")
+
+    pipe.downloader = DeadDownloader()
+    monkeypatch.setattr(pipe, "start", lambda: None)
+
+    job = Job(media_id="BVdead", bv="BVdead", title="消失的视频", uploader="UP",
+              duration=1.0, url="https://x")
+    store.upsert_job(job)
+    pipe._process_url("https://x", "BVdead")  # 模拟 rerun 带 media_id 的解析失败分支
+
+    j = store.get_job("BVdead")
+    assert j.status == "failed", f"失效链接 rerun 应标记 failed,实际: {j.status}"
+    assert "视频不存在" in j.error
+
 
 
 def test_local_file_resubmit_skips_when_done(env, monkeypatch):

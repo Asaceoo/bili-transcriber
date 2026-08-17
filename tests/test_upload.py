@@ -33,3 +33,29 @@ def test_upload_callback_saves_and_enqueues(tmp_path, monkeypatch):
     assert dest.exists(), "上传文件未落盘到 uploads 目录"
     assert dest.read_bytes() == data, "落盘内容不完整"
     assert captured.get("path") == dest, "submit_local 未被调用或路径不一致"
+
+
+def test_upload_filename_sanitized_against_traversal(tmp_path, monkeypatch):
+    """安全回归:客户端传入含 ../ 的恶意文件名不得逃逸 uploads 目录。"""
+    import app.main as m
+
+    monkeypatch.setattr(m.ui, "notify", lambda *a, **k: None)
+    monkeypatch.setattr(m.pipeline, "uploads_dir", tmp_path)
+    captured = {}
+
+    def fake_submit_local(p):
+        captured["path"] = Path(p)
+        return "local:fake"
+
+    monkeypatch.setattr(m.pipeline, "submit_local", fake_submit_local)
+
+    data = b"X" * 2048
+    fu = SmallFileUpload(name="../../escape.mp4", content_type="video/mp4", _data=data)
+    ev = UploadEventArguments(sender=None, client=None, file=fu)
+    asyncio.run(m._on_upload(ev))
+
+    dest = captured["path"]
+    assert tmp_path in dest.parents, "落盘路径不得逃逸出 uploads 目录"
+    assert ".." not in dest.parts, "文件名不得残留路径穿越片段"
+    assert dest.exists() and dest.read_bytes() == data
+

@@ -25,7 +25,7 @@ class Task:
     """队列任务描述符。kind 决定后续处理分支。"""
     kind: str            # 'url' = B站链接;'local' = 本地上传文件
     url: str = ""
-    media_id: str = ""
+    media_id: str = ""   # rerun 时携带,用于把"解析失败"回写到已存在的 job
 
 
 class Pipeline:
@@ -118,7 +118,8 @@ class Pipeline:
             self._queue.put(Task(kind="local", media_id=media_id))
             self.start()
         else:
-            self.submit(job.url)
+            self._queue.put(Task(kind="url", url=job.url, media_id=media_id))
+            self.start()
 
     # ---------- 内部 ----------
 
@@ -153,7 +154,7 @@ class Pipeline:
                 break
             try:
                 if item.kind == "url":
-                    self._process_url(item.url)
+                    self._process_url(item.url, item.media_id)
                 elif item.kind == "local":
                     self._process_local(item.media_id)
             except Exception:
@@ -162,12 +163,20 @@ class Pipeline:
             finally:
                 self._queue.task_done()
 
-    def _process_url(self, url: str) -> None:
+    def _process_url(self, url: str, media_id: str = "") -> None:
         self._emit(f"正在解析链接:{url}")
         try:
             entries = self.downloader.probe(url)
         except DownloadError as exc:
             self._emit(f"解析失败:{exc}")
+            # 二次转写(rerun)时若链接已失效,需把已存在的任务标记为失败,
+            # 否则会一直停在"排队中"且无任何反馈。
+            if media_id:
+                job = self.store.get_job(media_id)
+                if job:
+                    job.status, job.error = "failed", str(exc)[:500]
+                    job.finished_at = datetime.now().isoformat(timespec="seconds")
+                    self.store.upsert_job(job)
             return
         self._emit(f"共 {len(entries)} 个视频待处理")
         for info in entries:
@@ -200,17 +209,28 @@ class Pipeline:
             media_id=job.media_id, bv="", title=job.title, uploader=job.uploader,
             duration=job.duration, url="", part=1, total_parts=1,
         )
-        self._process_job(job, info)
+        try:
+            self._process_job(job, info)
+        except Exception as exc:
+            # 本地任务(源文件缺失/损坏、转码或转写失败)必须落库为 failed,
+            # 否则会停在"排队中"且无任何错误反馈。
+            logger.exception("本地任务失败: %s", media_id)
+            job.status, job.error = "failed", str(exc)[:500]
+            job.finished_at = datetime.now().isoformat(timespec="seconds")
+            self.store.upsert_job(job)
+            self._emit(f"失败:{job.title}({exc})")
 
-    def _job_dir(self, info: MediaInfo) -> Path:
+    def _job_dir(self, info: MediaInfo, unique_suffix: str = "") -> Path:
         folder = getattr(info, "playlist_title", "") or info.title
         name = _safe_name(folder) if not info.bv else f"{info.bv}_{_safe_name(folder)}"
+        if unique_suffix:
+            name = f"{name}_{_safe_name(unique_suffix)}"
         d = self.settings.resolve_output_dir(self.base_dir) / name
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     def _process_job(self, job: Job, info: MediaInfo) -> None:
-        job_dir = self._job_dir(info)
+        job_dir = self._job_dir(info, unique_suffix=job.media_id if job.source_type == "local" else "")
         wav = self.cache_dir / f"{_safe_name(info.media_id) or info.media_id}.wav"
 
         # 1. 获取音频源(本地上传文件跳过下载阶段)
