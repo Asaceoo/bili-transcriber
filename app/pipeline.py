@@ -187,10 +187,18 @@ class Pipeline:
         job.txt_path = str(writers.write_txt(segments, job_dir / f"{stem}.txt"))
         job.md_path = str(writers.write_md(meta, segments, job_dir / f"{stem}.md"))
 
-        wav.unlink(missing_ok=True)  # 中间产物
+        # 中间产物清理：在回收站不可用的受限环境（沙箱）中，删除操作会被
+        # safe-delete 拦截并抛 OSError；清理失败不应让已成功转写的任务被判失败。
+        try:
+            wav.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("清理中间 WAV 缓存失败（已忽略，文件保留）: %s | %s", wav, exc)
         if not self.settings.keep_audio:
-            audio.unlink(missing_ok=True)
-            job.audio_path = ""
+            try:
+                audio.unlink(missing_ok=True)
+                job.audio_path = ""
+            except OSError as exc:
+                logger.warning("清理原始音频缓存失败（已忽略，文件保留）: %s | %s", audio, exc)
 
         job.status, job.progress = "done", 1.0
         job.finished_at = datetime.now().isoformat(timespec="seconds")

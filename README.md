@@ -56,3 +56,20 @@ output/{BV号}_{标题}/
 - **CUDA 库**:cuBLAS/cuDNN 通过 pip 轮子(`nvidia-cublas-cu12`、`nvidia-cudnn-cu12`)安装,启动时自动注册 DLL 路径,无需手动装 CUDA Toolkit
 - **环境自愈**:启动时自动清理指向不存在文件的 `SSL_CERT_FILE` 等证书环境变量(Anaconda 常见问题)
 - **断点续跑**:下载的音频与转码的 wav 都会缓存,失败后重跑不会重复下载/转码
+
+## 文档
+
+| 文档 | 链接 |
+|------|------|
+| 用户手册（中文） | [docs/user-guide-zh.md](docs/user-guide-zh.md) |
+| User Guide (English) | [docs/user-guide-en.md](docs/user-guide-en.md) |
+| 技术手册（中文） | [docs/technical-manual-zh.md](docs/technical-manual-zh.md) |
+| Technical Manual (English) | [docs/technical-manual-en.md](docs/technical-manual-en.md) |
+
+## 开源许可
+
+本项目基于 [MIT License](LICENSE) 开源。纯本地处理,音频与转写文本均不上传,可放心用于隐私敏感或离线批量场景。
+
+## 贡献
+
+欢迎提交 Issue / Pull Request。开发入口 `python -m app.main`,测试 `pytest -q`,一键发布 `python scripts/release.py`。

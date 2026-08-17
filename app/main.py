@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections import deque
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from app.downloader import Downloader
 from app.pipeline import Pipeline
 from app.store import DEFAULT_SETTINGS, Job, Settings, Store, load_settings, save_settings
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 STATUS_LABEL = {
@@ -32,6 +36,37 @@ pipeline = Pipeline(
     base_dir=BASE_DIR, on_event=events.append,
 )
 
+# ---------- QTable 插槽模板 ----------
+_STATUS_BADGE = '''
+<q-td :props="props">
+  <q-badge
+    :color="props.row.raw_status === 'done' ? 'positive'
+           : props.row.raw_status === 'failed' ? 'negative'
+           : props.row.raw_status === 'transcribing' ? 'purple'
+           : props.row.raw_status === 'downloading' ? 'blue'
+           : props.row.raw_status === 'converting' ? 'teal'
+           : props.row.raw_status === 'saving' ? 'orange'
+           : 'grey'"
+    :label="props.value"
+    outline
+  />
+</q-td>
+'''
+
+_PROGRESS_BAR = '''
+<q-td :props="props">
+  <div style="display:flex;align-items:center;gap:8px;min-width:130px">
+    <q-linear-progress
+      :value="props.value / 100"
+      size="xs"
+      :color="props.row.raw_status === 'failed' ? 'negative' : 'primary'"
+      style="flex:1"
+    />
+    <span style="font-size:0.85em;white-space:nowrap">{{ props.value }}%</span>
+  </div>
+</q-td>
+'''
+
 
 def _open_path(path: str) -> None:
     """在资源管理器中打开文件所在目录并选中文件。"""
@@ -40,9 +75,11 @@ def _open_path(path: str) -> None:
         return
     try:
         if os.name == "nt":
-            subprocess.Popen(["explorer", f"/select,{os.path.normpath(path)}"])
+            subprocess.Popen(["explorer", f"/select,{Path(path)}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
         else:
-            os.startfile(path) if hasattr(os, "startfile") else subprocess.Popen(["xdg-open", path])  # type: ignore[misc]
+            subprocess.Popen(["xdg-open", str(Path(path).parent)])
     except OSError as exc:
         ui.notify(f"打开失败:{exc}", type="negative")
 
@@ -69,9 +106,21 @@ def _fmt_dur(seconds: float) -> str:
     return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
 
+def _rerun(media_id: str) -> None:
+    pipeline.rerun(media_id)
+    ui.notify("已重新入队")
+
+
+def _reset_settings(out_input) -> None:
+    for k, v in DEFAULT_SETTINGS.items():
+        setattr(settings, k, v)
+    out_input.set_value(settings.output_dir)
+    ui.notify("已恢复默认值,记得点保存")
+
+
 @ui.page("/")
 def main_page() -> None:
-    ui.colors(primary="#fb7299")  # B 站粉
+    ui.colors(primary="#fb7299")
 
     with ui.header().classes("items-center justify-between"):
         ui.label("B站音频本地转写").classes("text-lg font-bold")
@@ -89,23 +138,24 @@ def main_page() -> None:
     with ui.tab_panels(tabs, value=tab_tasks).classes("w-full"):
         # ---------- 任务页 ----------
         with ui.tab_panel(tab_tasks):
-            with ui.row().classes("w-full items-center gap-2"):
-                url_input = ui.input(placeholder="粘贴 B 站视频/合集链接…").classes("flex-grow")
+            with ui.card().classes("w-full"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    url_input = ui.input(placeholder="粘贴 B 站视频/合集链接…").classes("flex-grow")
 
-                def submit() -> None:
-                    url = (url_input.value or "").strip()
-                    if not url:
-                        ui.notify("请输入链接", type="warning")
-                        return
-                    pipeline.submit(url)
-                    url_input.set_value("")
-                    ui.notify("已加入队列,正在解析…")
+                    def submit() -> None:
+                        url = (url_input.value or "").strip()
+                        if not url:
+                            ui.notify("请输入链接", type="warning")
+                            return
+                        pipeline.submit(url)
+                        url_input.set_value("")
+                        ui.notify("已加入队列,正在解析…")
 
-                ui.button("添加任务", icon="add", on_click=submit)
+                    ui.button("添加任务", icon="add", on_click=submit)
 
-            log = ui.log(max_lines=100).classes("w-full h-40")
+                log = ui.log(max_lines=100).classes("w-full h-40")
 
-            ui.label("进行中的任务").classes("font-medium mt-2")
+            ui.label("进行中的任务").classes("font-medium mt-4")
             active_table = ui.table(
                 columns=[
                     {"name": "title", "label": "标题", "field": "title", "align": "left"},
@@ -116,6 +166,12 @@ def main_page() -> None:
                 ],
                 rows=[],
             ).classes("w-full")
+
+            with active_table.add_slot("body-cell-status", template=_STATUS_BADGE):
+                pass
+
+            with active_table.add_slot("body-cell-progress", template=_PROGRESS_BAR):
+                pass
 
         # ---------- 历史页 ----------
         with ui.tab_panel(tab_history):
@@ -129,18 +185,31 @@ def main_page() -> None:
                     {"name": "duration", "label": "时长", "field": "duration"},
                     {"name": "status", "label": "状态", "field": "status"},
                     {"name": "error", "label": "错误", "field": "error", "align": "left"},
-                    {"name": "actions", "label": "操作", "field": "actions"},
                 ],
                 rows=[],
+                selection="single",
             ).classes("w-full")
 
-            with history_table.add_slot("body-cell-actions"):
-                with ui.button(icon="folder_open", color="primary").props(
-                        "flat dense size=sm").on("click", lambda e: _open_path(e.args[1]["md_path"])) as btn1:
-                    ui.tooltip("打开所在文件夹")
-                with ui.button(icon="replay", color="primary").props(
-                        "flat dense").on("click", lambda e: _rerun(e.args[1]["media_id"])) as btn2:
-                    ui.tooltip("重新转写")
+            with history_table.add_slot("body-cell-status", template=_STATUS_BADGE):
+                pass
+
+            def _open_selected() -> None:
+                rows = history_table.selected
+                if not rows:
+                    ui.notify("请先在表格中选择一行", type="info")
+                    return
+                _open_path(rows[0].get("md_path", ""))
+
+            def _rerun_selected() -> None:
+                rows = history_table.selected
+                if not rows:
+                    ui.notify("请先在表格中选择一行", type="info")
+                    return
+                _rerun(rows[0].get("media_id", ""))
+
+            with ui.row().classes("mt-2 gap-2"):
+                ui.button("打开所在文件夹", icon="folder_open", on_click=_open_selected)
+                ui.button("重新转写", icon="replay", on_click=_rerun_selected)
 
             def refresh_history() -> None:
                 history_table.rows = [_job_row(j) for j in store.list_jobs(search.value or "")]
@@ -148,29 +217,31 @@ def main_page() -> None:
 
         # ---------- 设置页 ----------
         with ui.tab_panel(tab_settings):
-            with ui.column().classes("max-w-lg gap-2"):
-                out_input = ui.input("输出目录(相对项目根或绝对路径)").bind_value(
-                    settings, "output_dir").classes("w-full")
-                with ui.row().classes("items-center gap-4"):
-                    ui.select(MODEL_OPTIONS, label="转写模型", value=settings.model_size).bind_value(
-                        settings, "model_size")
-                    ui.select({"auto": "自动", "cuda": "GPU", "cpu": "CPU"}, label="设备",
-                              value=settings.device).bind_value(settings, "device")
-                with ui.row().classes("items-center gap-4"):
-                    ui.select(["auto", "float16", "int8_float16", "int8"], label="计算精度",
-                              value=settings.compute_type).bind_value(settings, "compute_type")
-                    ui.select({"": "自动检测", "zh": "中文", "en": "English"}, label="语言",
-                              value=settings.language).bind_value(settings, "language")
-                ui.switch("保留原始音频", value=settings.keep_audio).bind_value(settings, "keep_audio")
-                ui.switch("VAD 人声过滤(静音不转写)", value=settings.vad).bind_value(settings, "vad")
+            with ui.card().classes("max-w-lg"):
+                with ui.column().classes("gap-3"):
+                    out_input = ui.input("输出目录(相对项目根或绝对路径)").bind_value(
+                        settings, "output_dir").classes("w-full")
+                    with ui.row().classes("items-center gap-4"):
+                        ui.select(MODEL_OPTIONS, label="转写模型", value=settings.model_size).bind_value(
+                            settings, "model_size")
+                        ui.select({"auto": "自动", "cuda": "GPU", "cpu": "CPU"}, label="设备",
+                                  value=settings.device).bind_value(settings, "device")
+                    with ui.row().classes("items-center gap-4"):
+                        ui.select(["auto", "float16", "int8_float16", "int8"], label="计算精度",
+                                  value=settings.compute_type).bind_value(settings, "compute_type")
+                        ui.select({"": "自动检测", "zh": "中文", "en": "English"}, label="语言",
+                                  value=settings.language).bind_value(settings, "language")
+                    ui.switch("保留原始音频", value=settings.keep_audio).bind_value(settings, "keep_audio")
+                    ui.switch("VAD 人声过滤(静音不转写)", value=settings.vad).bind_value(settings, "vad")
 
-                def save() -> None:
-                    save_settings(settings, DATA_DIR / "settings.json")
-                    pipeline.apply_settings(settings)
-                    ui.notify("设置已保存(模型变更在下个任务生效)", type="positive")
+                    def save() -> None:
+                        save_settings(settings, DATA_DIR / "settings.json")
+                        pipeline.apply_settings(settings)
+                        ui.notify("设置已保存(模型变更在下个任务生效)", type="positive")
 
-                ui.button("保存设置", icon="save", on_click=save).classes("mt-2")
-                ui.button("恢复默认", on_click=lambda: _reset_settings(out_input)).props("flat")
+                    with ui.row().classes("gap-2 mt-2"):
+                        ui.button("保存设置", icon="save", on_click=save)
+                        ui.button("恢复默认", on_click=lambda: _reset_settings(out_input)).props("flat")
 
     # ---------- 定时刷新(工作线程只写 Store/deque,UI 线程轮询) ----------
     def refresh() -> None:
@@ -186,24 +257,12 @@ def main_page() -> None:
     ui.timer(0.6, refresh)
 
 
-def _rerun(media_id: str) -> None:
-    pipeline.rerun(media_id)
-    ui.notify("已重新入队")
-
-
-def _reset_settings(out_input) -> None:
-    for k, v in DEFAULT_SETTINGS.items():
-        setattr(settings, k, v)
-    out_input.set_value(settings.output_dir)
-    ui.notify("已恢复默认值,记得点保存")
-
-
 def main() -> None:
     ui.run(
         title="B站音频本地转写",
         native=True,
         window_size=(980, 720),
-        port=8765,
+        port=int(os.environ.get("BILI_PORT", "8765")),
         reload=False,
         favicon="🅑",
     )

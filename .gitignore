@@ -8,3 +8,11 @@ data/
 *.egg-info/
 .mimosa/
 .zcode/
+
+# 打包产物与发布中间文件
+dist/
+build/bili-transcriber/
+*.log
+
+# 工作区记忆(本地,非项目资产)
+.workbuddy/

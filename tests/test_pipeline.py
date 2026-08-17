@@ -139,3 +139,26 @@ def test_wav_cache_reused_between_runs(env, monkeypatch):
     (tmp / "cache" / "BV1pipe_p1.wav").write_bytes(b"cached-wav")
     pipe._process_url("https://x")
     assert len(convert_calls) == 1  # 第二轮没有重新转码
+
+
+def test_safe_delete_failure_keeps_job_done(env, monkeypatch):
+    """回归(safe-delete 拦截):缓存删除被环境拒绝抛 OSError 时,
+    已成功转写的任务仍应标记 done,而非被误判 failed。"""
+    pipe, store, settings, events, tmp = env
+    _fake_transcriber(pipe)
+
+    # 模拟沙箱 safe-delete:所有 unlink 抛 PermissionError(OSError 子类)
+    def _blocked_unlink(self, missing_ok=False):
+        raise PermissionError("[SAFE_DELETE_FAIL_CLOSED] recycle bin unavailable")
+    monkeypatch.setattr(Path, "unlink", _blocked_unlink)
+
+    pipe._process_url("https://x")
+
+    job = store.get_job("BV1pipe_p1")
+    assert job.status == "done", f"删除被拦截不应判失败,实际: {job.error}"
+    assert not job.error  # 删除失败已降级为 warning,error 字段应为空
+    out_dir = tmp / "out" / "BV1pipe_合集X"
+    assert (out_dir / "管道测试.md").exists()
+    assert (out_dir / "管道测试.srt").exists()
+    # 缓存因删除被拦而保留(预期行为)
+    assert list((tmp / "cache").glob("*.wav"))

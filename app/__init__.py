@@ -1,6 +1,7 @@
 """B站音频本地转写桌面工具。"""
 
 import os
+import sys
 from pathlib import Path
 
 # Anaconda 等环境可能把 SSL_CERT_FILE 指向不存在的文件,会导致
@@ -19,11 +20,14 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 # CTranslate2(CUDA)需要的 cuBLAS/cuDNN 通过 pip 轮子安装,
 # 位于 site-packages/nvidia/*/bin,须在加载模型前加入 DLL 搜索路径。
-import sysconfig
+if getattr(sys, "frozen", False):
+    _dll_base = Path(sys._MEIPASS)
+else:
+    import sysconfig
+    _dll_base = Path(sysconfig.get_paths()["purelib"])
 
-_site = Path(sysconfig.get_paths()["purelib"])
 for _sub in ("nvidia/cublas/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin"):
-    _dll_dir = _site / _sub
+    _dll_dir = _dll_base / _sub
     if _dll_dir.is_dir():
         os.add_dll_directory(str(_dll_dir))
         os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
