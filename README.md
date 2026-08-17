@@ -48,3 +48,11 @@ output/{BV号}_{标题}/
 - **下载/解析失败**:B 站接口变动导致,升级 yt-dlp:`pip install -U yt-dlp`
 - **转写很慢**:确认设置中设备为 cuda;首次运行需下载模型
 - **显存不足**:设置中把计算精度从 float16 改为 int8,或换用更小的模型
+- **唱歌/纯音乐视频**:Silero VAD 只识别人声说话,遇到此类内容会自动关闭 VAD 重试,属正常现象
+
+## 技术说明
+
+- **模型下载**:大陆网络默认走 `hf-mirror.com` 镜像并禁用 Xet 协议;需要官方源时设置环境变量 `HF_ENDPOINT=https://huggingface.co`
+- **CUDA 库**:cuBLAS/cuDNN 通过 pip 轮子(`nvidia-cublas-cu12`、`nvidia-cudnn-cu12`)安装,启动时自动注册 DLL 路径,无需手动装 CUDA Toolkit
+- **环境自愈**:启动时自动清理指向不存在文件的 `SSL_CERT_FILE` 等证书环境变量(Anaconda 常见问题)
+- **断点续跑**:下载的音频与转码的 wav 都会缓存,失败后重跑不会重复下载/转码

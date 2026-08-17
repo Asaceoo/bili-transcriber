@@ -61,26 +61,16 @@ class Transcriber:
 
     def transcribe(self, wav: Path, duration: float = 0.0,
                    progress: ProgressCallback | None = None) -> list[Segment]:
-        """转写 wav,返回按时间排序的片段列表。duration>0 时按片段结束时间估算进度。
-
-        VAD 开启但零语音时(唱歌/纯音乐场景 Silero 会全部滤除),自动关闭 VAD 重试。
-        """
+        """转写 wav,返回按时间排序的片段列表。duration>0 时按片段结束时间估算进度。"""
         self.load()
-        segments = self._run(wav, duration, progress, vad=self.vad)
-        if self.vad and not segments:
-            logger.warning("VAD 未检出任何语音(可能是唱歌/纯音乐),关闭 VAD 重试")
-            if progress is not None:
-                progress(0.0)
-            segments = self._run(wav, duration, progress, vad=False)
-        return segments
-
-    def _run(self, wav: Path, duration: float, progress: ProgressCallback | None,
-             vad: bool) -> list[Segment]:
         segments: list[Segment] = []
         with self._lock:
-            it, info = self._model.transcribe(
-                str(wav), vad_filter=vad, beam_size=5, language=self.language,
+            kwargs = dict(
+                vad_filter=self.vad,
+                beam_size=5,
+                language=self.language,
             )
+            it, info = self._model.transcribe(str(wav), **kwargs)
             if progress is not None and duration <= 0:
                 duration = float(getattr(info, "duration", 0.0) or 0.0)
             for seg in it:
