@@ -25,9 +25,13 @@ def to_wav16k_mono(src: Path, dst: Path, ffmpeg: str = "ffmpeg") -> Path:
         str(dst),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        # timeout 防止 ffmpeg 僵死(如损坏源、设备忙)永久阻塞串行工作线程
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=1800)
     except FileNotFoundError as exc:
         raise ConverterError("未找到 ffmpeg,请安装并加入 PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConverterError(f"ffmpeg 转码超时(>30min): {src}") from exc
     if proc.returncode != 0:
         raise ConverterError(f"ffmpeg 转码失败: {proc.stderr.strip()[:500]}")
     return dst

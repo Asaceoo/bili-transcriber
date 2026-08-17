@@ -10,7 +10,7 @@
 [Setup]
 AppId={{B1A2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#AppName}
-AppVersion=0.1.4
+AppVersion=0.1.6
 AppPublisher={#AppPublisher}
 DefaultDirName={pf}\{#AppName}
 DefaultGroupName={#AppName}
@@ -43,8 +43,9 @@ Name: "{app}\cache"; Permissions: users-modify
 Name: "{app}\output"; Permissions: users-modify
 
 [Icons]
-; 桌面快捷方式
-Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
+; 桌面快捷方式(使用 {userdesktop} 而非 {commondesktop},与 PrivilegesRequired=lowest 一致,
+; 避免非管理员安装时写 C:\Users\Public\Desktop 触发 0x80070005 拒绝访问)
+Name: "{userdesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
 ; 开始菜单
 Name: "{group}\{#AppName}"; Filename: "{app}\{#ExeName}"; WorkingDir: "{app}"
 

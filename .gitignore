@@ -13,6 +13,11 @@ data/
 # 打包产物与发布中间文件
 dist/
 build/bili-transcriber/
+# 单文件便携版构建目录(PyInstaller --onefile 工作目录)
+build/bili-transcriber-onefile/
+# release.py 撤离旧构建时产生的同名备份目录(同目录 rename,不入库)
+build/*.bak_*/
+dist/*.bak_*/
 *.log
 
 # 工作区记忆(本地,非项目资产)

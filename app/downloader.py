@@ -53,6 +53,9 @@ class Downloader:
             "noplaylist": False,
             "skip_download": True,
             "extract_flat": False,
+            # 网络健壮性:解析阶段也设超时,避免僵死连接永久阻塞工作线程
+            "socket_timeout": 30,
+            "retries": 3,
         }
         with self._lock:
             with self._ydl_factory(opts) as ydl:
@@ -111,6 +114,11 @@ class Downloader:
             "overwrites": True,
             "progress_hooks": [hook],
             "nopart": True,
+            # 网络健壮性:下载设超时与重试,避免僵死连接永久阻塞工作线程
+            "socket_timeout": 30,
+            "retries": 3,
+            "fragment_retries": 3,
+            "retry_sleep": 3,
         }
         with self._lock:
             with self._ydl_factory(opts) as ydl:

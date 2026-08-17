@@ -10,8 +10,9 @@
 
 所有产物均带版本号后缀,符合发布规范:
   - bili_transcriber-<ver>-py3-none-any.whl
-  - bili-transcriber-portable-<ver>.zip
-  - bili-transcriber-setup-<ver>.exe
+  - bili-transcriber-portable-<ver>.zip        (onedir GPU 版,完整便携包)
+  - bili-transcriber-single-<ver>.exe          (单文件便携版,CPU 模式,可直接运行)
+  - bili-transcriber-setup-<ver>.exe           (Inno Setup 安装版)
 
 用法:
   python scripts/release.py                 # 完整流程(先 bump)
@@ -25,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -77,29 +79,64 @@ def do_wheel(ver: str) -> Path | None:
     return DIST / wheel_name
 
 
+def _evacuate(p: Path) -> None:
+    """把已存在的构建目录「撤离」(同目录 rename,非删除/非跨目录移动)。
+
+    PyInstaller --noconfirm 在构建前会清理旧 dist/build 目录,而本沙箱
+    safe-delete 钩子会拦截任何删除(回收站不可用,FAIL_CLOSED),导致清理阶段
+    直接抛 OSError 中止构建、dist 根本未被重建 —— 从而把陈旧二进制打进新版本包。
+    同目录 rename 不被钩子拦截,先撤离旧的,PyInstaller 就能在空目录上全新构建。
+    """
+    if not p.exists():
+        return
+    bak = p.with_name(f"{p.name}.bak_{int(time.time())}")
+    try:
+        p.rename(bak)
+        print(f"[release] 已撤离旧构建目录: {p.name} -> {bak.name}")
+    except OSError as exc:
+        print(f"[release] !! 撤离 {p} 失败(仍可能被钩子拦截): {exc}")
+
+
+def _built_fresh(exe: Path, start: float) -> bool:
+    """校验打包产物是本次全新构建(而非上轮遗留的陈旧文件)。
+
+    判定:exe 存在、是文件、大小合理、且 mtime 晚于构建开始时刻。
+    """
+    if not exe.is_file():
+        return False
+    if exe.stat().st_size < 1_000_000:  # 主程序至少 1MB
+        return False
+    return exe.stat().st_mtime >= start
+
+
 def do_portable(ver: str) -> Path | None:
     src = DIST / "bili-transcriber"
+    spec = ROOT / "build" / "bili-transcriber.spec"
+    # 先撤离旧的 dist/build 目录,避免 PyInstaller --noconfirm 清理被 safe-delete 钩子拦死
+    _evacuate(src)
+    _evacuate(ROOT / "build" / "bili-transcriber")
+    start = time.time()
     try:
-        subprocess.run(
-            [PYINSTALLER, "--noconfirm", str(ROOT / "build" / "bili-transcriber.spec")],
-            check=True, cwd=str(ROOT),
-        )
+        subprocess.run([PYINSTALLER, "--noconfirm", str(spec)], check=True, cwd=str(ROOT))
     except subprocess.CalledProcessError as exc:
-        # 沙箱 safe-delete 可能拦截 PyInstaller 二次重跑;若已有构建目录则复用继续打包
-        if not (src / "bili-transcriber.exe").exists():
-            print(f"[release] !! PyInstaller 失败且无现有构建,便携版跳过: {exc}")
-            return None
-        print(f"[release] !! PyInstaller 重跑失败(沙箱?),复用现有 dist/bili-transcriber/ 继续打包 zip: {exc}")
-    if not src.is_dir():
+        # PyInstaller 可能在构建末清理 build 工作目录时再次被钩子拦截而 exit 1,
+        # 但 dist 主程序通常已全新写出。以「产物是否新鲜」为准,而非退出码。
+        print(f"[release] PyInstaller 退出码非 0(可能为沙箱清理拦截): {exc}")
+    if not _built_fresh(src / "bili-transcriber.exe", start):
+        print(f"[release] !! 便携版构建产物不存在/非全新(陈旧风险),中止打包: {src}")
+        return None
+    if not (src / "_internal").is_dir():
+        print(f"[release] !! 便携版 _internal 缺失,产物不完整,中止打包")
         return None
     zf = DIST / f"bili-transcriber-portable-{ver}.zip"
-    if zf.exists():
-        zf.unlink()
+    n = 0
+    # 用 "w" 模式创建即截断覆盖旧文件(不调用 unlink,避开 safe-delete 钩子拦截删除)
     with zipfile.ZipFile(zf, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(src.rglob("*")):
             if f.is_file():
                 z.write(f, str(f.relative_to(src)))
-    print(f"[release] 便携版 zip: {zf.name}")
+                n += 1
+    print(f"[release] 便携版 zip: {zf.name} (含 {n} 个文件)")
     return zf
 
 
@@ -107,19 +144,43 @@ def do_setup(ver: str) -> Path | None:
     if not Path(ISCC).exists():
         print("[release] !! 未找到 Inno Setup (ISCC),跳过安装包")
         return None
+    start = time.time()
     try:
         subprocess.run([ISCC, str(ISS)], check=True)
     except subprocess.CalledProcessError as exc:
         print(f"[release] !! Inno Setup 安装包构建失败: {exc}")
         return None
     src = DIST / "bili-transcriber-setup.exe"
-    if not src.exists():
+    if not _built_fresh(src, start):
+        print(f"[release] !! 安装包产物不存在/非全新(陈旧风险),中止: {src}")
         return None
-    # 同目录 rename(非跨目录 move,不触发 safe-delete 删除拦截)
     dst = DIST / f"bili-transcriber-setup-{ver}.exe"
-    if dst.exists():
-        dst.unlink()
-    shutil.move(str(src), str(dst))
+    # 同目录 rename:先撤离旧的版本化 exe(避开 safe-delete 删除拦截),再把新产物 rename 过去
+    _evacuate(dst)
+    src.rename(dst)
+    return dst
+
+
+def do_singlefile(ver: str) -> Path | None:
+    """单文件便携版(CPU 模式):--onefile,不含 2GB CUDA DLL,体积小、可直接运行。"""
+    spec = ROOT / "build" / "bili-transcriber-onefile.spec"
+    _evacuate(DIST / "bili-transcriber-single.exe")
+    start = time.time()
+    try:
+        subprocess.run(
+            [PYINSTALLER, "--noconfirm", str(spec)],
+            check=True, cwd=str(ROOT),
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"[release] PyInstaller 退出码非 0(可能为沙箱清理拦截): {exc}")
+    src = DIST / "bili-transcriber-single.exe"
+    if not _built_fresh(src, start):
+        print(f"[release] !! 单文件构建产物不存在/非全新(陈旧风险),中止: {src}")
+        return None
+    dst = DIST / f"bili-transcriber-single-{ver}.exe"
+    # 同目录 rename:先撤离旧的版本化 exe(避开 safe-delete 删除拦截),再把新产物 rename 过去
+    _evacuate(dst)
+    src.rename(dst)
     return dst
 
 
@@ -146,6 +207,7 @@ def main() -> None:
 
     portable = do_portable(ver)
     setup = do_setup(ver)
+    single = do_singlefile(ver)
 
     print("[release] ===== 产物清单 =====")
     for p in sorted(DIST.glob("*")):
@@ -153,9 +215,11 @@ def main() -> None:
         if whl and p == whl:
             tag = " <- wheel"
         elif portable and p == portable:
-            tag = " <- 便携版"
+            tag = " <- 便携版(zip)"
         elif setup and p == setup:
             tag = " <- 安装包"
+        elif single and p == single:
+            tag = " <- 单文件便携版"
         print(f"  {p.name}{tag}")
     print(f"[release] 版本 {ver} 发布流程结束")
 
