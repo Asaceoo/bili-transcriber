@@ -14,8 +14,33 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 PROJECT = Path(SPECPATH).parent          # D:\bilibili
 VENV_SP = PROJECT / ".venv" / "Lib" / "site-packages"
 
-# ---------- 收集 nvidia DLL ----------
+# ---------- 收集 Anaconda 运行时 DLL ----------
+# 基础 Python 来自 Anaconda(sys.base_prefix),CPython 标准库 C 扩展(_ctypes/_sqlite3/
+# _lzma/_bz2/_decimal/pyexpat/_zstd)直接 import "ffi.dll"/"sqlite3.dll"/... 等位于
+# Anaconda/Library/bin 的卫星 DLL。在 onedir 结构中,_ctypes.pyd 与这些 DLL 同在
+# _internal/ 目录下即可被加载器找到,故 dst 用 "."。
+ANACONDA = Path(sys.base_prefix)
 binaries = []
+_anaconda_libbin = ANACONDA / "Library" / "bin"
+for _n in ("ffi.dll", "sqlite3.dll", "liblzma.dll", "LIBBZ2.dll",
+           "libmpdec-4.dll", "libexpat.dll", "zstd.dll"):
+    _f = _anaconda_libbin / _n
+    if _f.is_file():
+        binaries.append((str(_f), "."))
+# VC 运行时全家桶(部分第三方扩展依赖其变体)
+for _pat in ("vcruntime140*.dll", "msvcp140*.dll", "concrt140.dll"):
+    for _f in _anaconda_libbin.glob(_pat):
+        binaries.append((str(_f), "."))
+# python314.dll / python3.dll(稳定 ABI 的 python3.dll 是 _ctypes.pyd 直接依赖)
+for _cand in (ANACONDA / "python314.dll", ANACONDA / "python3.dll"):
+    if _cand.is_file():
+        binaries.append((str(_cand), "."))
+# API 集转发 DLL
+for _f in ANACONDA.glob("api-ms-win-*.dll"):
+    if _f.is_file():
+        binaries.append((str(_f), "."))
+
+# ---------- 收集 nvidia DLL ----------
 for pkg in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
     src = VENV_SP / "nvidia" / pkg / "bin"
     dst = f"nvidia/{pkg}/bin"
