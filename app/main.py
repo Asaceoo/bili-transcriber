@@ -111,28 +111,22 @@ def _rerun(media_id: str) -> None:
     ui.notify("已重新入队")
 
 
-def _on_upload(files) -> None:
-    """NiceGUI 上传回调:把文件写入 uploads 目录并入队本地转写。
-    兼容单文件(UploadEventArguments)与多文件(MultiUploadEventArguments)事件。"""
-    if not isinstance(files, (list, tuple)):
-        files = [files]
-    for f in files:
-        name = getattr(f, "name", "upload")
-        content = getattr(f, "content", None)
-        if not content and getattr(f, "path", None):
-            content = Path(f.path).read_bytes()
-        content = content or b""
-        if not content:
-            ui.notify(f"空文件,已跳过:{name}", type="warning")
-            continue
-        dest = pipeline.uploads_dir / name
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists():
-            from datetime import datetime as _dt
-            dest = dest.parent / f"{dest.stem}_{_dt.now().strftime('%H%M%S')}{dest.suffix}"
-        dest.write_bytes(content)
-        pipeline.submit_local(dest)
-        ui.notify(f"已上传并加入队列:{name}")
+async def _on_upload(e) -> None:
+    """NiceGUI 3.x 上传回调。
+
+    on_upload 的入参是 UploadEventArguments,其 .file 才是 FileUpload 对象。
+    FileUpload 没有顶层 .content 属性,内容需通过 file.save(path) 异步落盘。
+    每个文件单独触发一次该回调(multiple=True 时逐个调用)。"""
+    f = e.file
+    name = f.name or "upload"
+    dest = pipeline.uploads_dir / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        from datetime import datetime as _dt
+        dest = dest.parent / f"{dest.stem}_{_dt.now().strftime('%H%M%S')}{dest.suffix}"
+    await f.save(dest)          # 异步落盘:SmallFileUpload 写内存字节,LargeFileUpload 复制临时文件
+    pipeline.submit_local(dest)
+    ui.notify(f"已上传并加入队列:{name}")
 
 
 def _reset_settings(out_input) -> None:
@@ -186,8 +180,13 @@ def main_page() -> None:
                 ui.upload(
                     label="选择文件(支持 mp4/mkv/mov/avi/webm/flv/wmv/mp3/m4a/wav/ogg/opus/flac/aac)",
                     on_upload=_on_upload,
+                    on_rejected=lambda: ui.notify(
+                        "文件被浏览器拒绝(可能大小超限或类型不支持),请检查文件后重试。",
+                        type="negative",
+                    ),
                     auto_upload=True,
                     multiple=True,
+                    max_file_size=10 * 1024 * 1024 * 1024,  # 10 GB 上限,覆盖默认限制
                 ).classes("w-full")
 
             ui.label("进行中的任务").classes("font-medium mt-4")
