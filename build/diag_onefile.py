@@ -2,7 +2,7 @@ import os, sys, subprocess, tempfile
 
 PY = "C:/Users/iamly/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
 ANACONDA = "C:/Users/iamly/Anaconda3"
-EXE = "D:/bilibili/dist/bili-transcriber-single-0.1.8.exe"
+EXE = "D:/bilibili/dist/bili-transcriber-single-0.1.9.exe"
 
 work = tempfile.mkdtemp(prefix="onefile_diag_")
 print("extract workdir:", work)

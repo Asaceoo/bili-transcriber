@@ -37,6 +37,8 @@ class FakeDownloader:
 class FakeTranscriber:
     def __init__(self, fail=False):
         self.fail = fail
+        # 与真实 Transcriber 对齐的公开接口:pipeline 读取 resolved_device 标注任务设备
+        self.resolved_device = "cuda"
 
     def transcribe(self, wav, duration=0.0, progress=None):
         if self.fail:

@@ -16,7 +16,7 @@ VENV_SP = PROJECT / ".venv" / "Lib" / "site-packages"
 
 # ---------- 收集 nvidia DLL ----------
 binaries = []
-for pkg in ("cublas", "cudnn", "cuda_nvrtc"):
+for pkg in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
     src = VENV_SP / "nvidia" / pkg / "bin"
     dst = f"nvidia/{pkg}/bin"
     if src.is_dir():

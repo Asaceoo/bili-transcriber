@@ -47,6 +47,26 @@ for _f in ANACONDA.glob("api-ms-win-*.dll"):
     if _f.is_file():
         runtime_bins.append((str(_f), "."))
 
+# ---------- 收集 nvidia CUDA 运行时 DLL(供 ctranslate2 动态探测) ----------
+# 关键背景:ctranslate2 用 CUDA_DYNAMIC_LOADING=ON 编译,在导入/建模型阶段会
+# LoadLibrary("cublas64_12.dll") 探测 CUDA 后端,失败即抛
+# 'Library cublas64_12.dll is not found' —— 即便最终走 CPU 也一样。
+# 实测依赖链(pefile):cublas64_12.dll -> cublasLt64_12.dll(仅依赖 KERNEL32);
+# cublas/cublasLt 均未静态依赖 cudart 或 nvcuda(nvcuda 为 delay-load,只在真正
+# 发起 CUDA 计算时解析,CPU 模式永不触发)。故单文件版只需打包 cublas64_12 +
+# cublasLt64_12(共约 770MB)即可让探测通过;附 cudart64_12 兜底(实际不调用)。
+# cudnn / cuda_nvrtc 不需要,不打(否则体积破 GB)。
+NVCC_BIN = PROJECT / ".venv" / "Lib" / "site-packages" / "nvidia"
+_NVCC_CUBLAS = NVCC_BIN / "cublas" / "bin"
+_NVCC_CUDART = NVCC_BIN / "cuda_runtime" / "bin"
+for _n in ("cublas64_12.dll", "cublasLt64_12.dll"):
+    _f = _NVCC_CUBLAS / _n
+    if _f.is_file():
+        runtime_bins.append((str(_f), "."))
+_f = _NVCC_CUDART / "cudart64_12.dll"
+if _f.is_file():
+    runtime_bins.append((str(_f), "."))
+
 # ---------- 收集 NiceGUI / faster-whisper 静态资源 ----------
 datas = collect_data_files("nicegui") + collect_data_files("faster_whisper")
 

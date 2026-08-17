@@ -8,6 +8,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from app import converter
 from app.downloader import Downloader, DownloadError, MediaInfo, _safe_name
@@ -17,7 +18,7 @@ from app import writers
 
 logger = logging.getLogger(__name__)
 
-UpdateCallback = lambda job: None  # noqa: E731  仅用于类型说明
+UpdateCallback = Callable[[Job], None]  # 类型别名:任务更新回调(job) -> None
 
 
 @dataclass
@@ -267,7 +268,7 @@ class Pipeline:
         meta = writers.NoteMeta(
             title=info.title, uploader=info.uploader, duration=info.duration,
             bv=info.bv, url=info.url,
-            model=f"{self.settings.model_size} ({transcriber._resolve()[0]})",
+            model=f"{self.settings.model_size} ({transcriber.resolved_device})",
         )
         job.srt_path = str(writers.write_srt(segments, job_dir / f"{stem}.srt"))
         job.txt_path = str(writers.write_txt(segments, job_dir / f"{stem}.txt"))

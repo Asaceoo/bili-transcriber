@@ -5,7 +5,7 @@
 """
 import subprocess, sys, time, urllib.request, os, signal
 
-EXE = sys.argv[1] if len(sys.argv) > 1 else r"D:\bilibili\dist\bili-transcriber-single-0.1.8.exe"
+EXE = sys.argv[1] if len(sys.argv) > 1 else r"D:\bilibili\dist\bili-transcriber-single-0.1.9.exe"
 PORT = sys.argv[2] if len(sys.argv) > 2 else "8891"
 URL = f"http://127.0.0.1:{PORT}/"
 

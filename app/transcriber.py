@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,11 @@ class Transcriber:
     def loaded(self) -> bool:
         return self._model is not None
 
+    @property
+    def resolved_device(self) -> str:
+        """已解析的实际设备(cpu/cuda),供落盘元数据展示。"""
+        return self._resolve()[0]
+
     def load(self):
         if self._model is not None:
             return
@@ -47,14 +53,20 @@ class Transcriber:
         self._model = WhisperModel(self.model_size, device=device, compute_type=compute)
 
     def _resolve(self) -> tuple[str, str]:
-        device = self.device
-        if device == "auto":
-            try:
-                import ctranslate2
-                device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-            except Exception:
-                device = "cpu"
-        compute = self.compute_type
+        # 环境变量强制覆盖(单文件版 hook 会设置 BILI_DEVICE=cpu 绕过 CUDA DLL 探测)
+        env_device = os.environ.get("BILI_DEVICE")
+        env_compute = os.environ.get("BILI_COMPUTE_TYPE")
+        if env_device:
+            device = env_device
+        else:
+            device = self.device
+            if device == "auto":
+                try:
+                    import ctranslate2
+                    device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+                except Exception:
+                    device = "cpu"
+        compute = env_compute if env_compute else self.compute_type
         if compute == "auto":
             compute = "float16" if device == "cuda" else "int8"
         return device, compute
