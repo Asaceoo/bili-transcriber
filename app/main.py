@@ -127,8 +127,10 @@ def main_page() -> None:
         queue_label = ui.label("待处理:0")
 
     if not converter.ffmpeg_available():
-        with ui.banner().props("rounded").classes("bg-orange-100 text-orange-800 w-full"):
-            ui.label("未检测到 FFmpeg,请安装后加入 PATH,否则无法转码。")
+        with ui.card().props("flat rounded").classes("bg-orange-100 text-orange-800 w-full q-pa-md"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("warning").classes("text-orange-800")
+                ui.label("未检测到 FFmpeg,请安装后加入 PATH,否则无法转码。")
 
     with ui.tabs().classes("w-full") as tabs:
         tab_tasks = ui.tab("任务")
