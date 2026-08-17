@@ -6,3 +6,5 @@ cache/
 data/
 .pytest_cache/
 *.egg-info/
+.mimosa/
+.zcode/
