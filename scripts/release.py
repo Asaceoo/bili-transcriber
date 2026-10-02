@@ -228,6 +228,47 @@ def do_gpu_pack(ver: str) -> Path | None:
     return zf
 
 
+# ---------------------------------------------------------------------------
+# 文档版本快照:每次发布自动把 docs/ 四份手册生成「文件名带新版本号」的快照,
+# 版本号单一来源(pyproject.toml),随发布自动增加。
+# ---------------------------------------------------------------------------
+DOC_SNAPSHOTS = {
+    "user-guide-zh.md": "user-guide-zh-{ver}.md",
+    "user-guide-en.md": "user-guide-en-{ver}.md",
+    "technical-manual-zh.md": "technical-manual-zh-{ver}.md",
+    "technical-manual-en.md": "technical-manual-en-{ver}.md",
+}
+
+
+def snapshot_docs(ver: str) -> list[Path]:
+    """生成带版本号后缀的手册快照(如 user-guide-zh-0.1.33.md)。
+
+    快照内容与最新手册一致,仅把头部「本手册对应 vX」说明行替换为
+    发布快照声明,便于与滚动更新的最新版区分。
+    """
+    out: list[Path] = []
+    for src_name, pat in DOC_SNAPSHOTS.items():
+        src = ROOT / "docs" / src_name
+        if not src.is_file():
+            print(f"[release] !! 文档缺失,跳过快照: {src_name}")
+            continue
+        text = src.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        marker = f"**v{ver}**"
+        for i, line in enumerate(lines):
+            if marker in line and ("对应" in line or "matches" in line):
+                lines[i] = (
+                    f"> 发布版本快照 **v{ver}** — 由 `scripts/release.py` 自动生成,"
+                    "版本号取自 `pyproject.toml` 单一来源。"
+                )
+                break
+        dst = ROOT / "docs" / pat.format(ver=ver)
+        dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out.append(dst)
+        print(f"[release] 文档快照: {dst.name}")
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="bili-transcriber 一键发布")
     ap.add_argument("--wheel-only", action="store_true", help="bump + 构建 wheel(快速交付)")
@@ -251,6 +292,8 @@ def main() -> None:
         ver = do_bump()
         whl = do_wheel(ver)
         print(f"[release] wheel: {whl.name if whl else 'FAILED'}")
+
+    snapshot_docs(ver)  # 版本号随发布自动增加,生成带后缀手册快照
 
     if args.wheel_only:
         print("[release] --wheel-only 完成")

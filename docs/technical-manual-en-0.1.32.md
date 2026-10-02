@@ -1,7 +1,7 @@
 # bili-transcriber Technical Manual (English)
 
 > For developers and maintainers. Covers architecture, module responsibilities, concurrency model, data flow, security mechanisms, build/release process, and the test suite.
-> This manual matches **v0.1.32**. The versioned release copy is [technical-manual-en-0.1.32.md](technical-manual-en-0.1.32.md).
+> 发布版本快照 **v0.1.32** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ## 1. Overview
 

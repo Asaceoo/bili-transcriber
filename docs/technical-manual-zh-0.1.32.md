@@ -1,7 +1,7 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。说明架构、模块职责、并发模型、数据流、安全机制、构建发布流程与测试体系。
-> 本手册对应 **v0.1.32**。带版本号的发布版手册见 [technical-manual-zh-0.1.32.md](technical-manual-zh-0.1.32.md)。
+> 发布版本快照 **v0.1.32** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ## 1. 系统概览
 

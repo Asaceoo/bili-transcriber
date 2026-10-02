@@ -137,6 +137,8 @@ v0.1.15 起安装包**不再内置 CUDA 运行时**(核心包体积大幅缩小)
 | 技术手册（中文） | [docs/technical-manual-zh.md](docs/technical-manual-zh.md) |
 | Technical Manual (English) | [docs/technical-manual-en.md](docs/technical-manual-en.md) |
 
+> 上表为**滚动更新的最新版**手册。每次发布时 `scripts/release.py` 会自动生成带版本号后缀的快照（如 `docs/user-guide-zh-0.1.32.md`），版本号取自 `pyproject.toml` 单一来源。
+
 ## 开源许可
 
 本项目基于 [MIT License](LICENSE) 开源。纯本地处理,音频与转写文本均不上传,可放心用于隐私敏感或离线批量场景。
