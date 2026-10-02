@@ -25,3 +25,14 @@ dist/*.bak_*/
 
 # 临时验证脚本(本地调试用,不入库)
 verify_upload_real.py
+
+# 本地调试/运行时产物(不入库)
+.playwright-mcp/
+_tmp_dbg.py
+full_test.txt
+test_out.txt
+store.db
+store.db-shm
+store.db-wal
+# build/ 内下划线开头的临时脚本/媒体/旧构建(_old_builds 等)
+build/_*

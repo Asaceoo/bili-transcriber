@@ -23,7 +23,7 @@ This tool runs **entirely on your machine**. Audio and transcripts are never upl
 |------|-------------|
 | OS | Windows (verified on Windows 10/11) |
 | Python | 3.11 or newer (dev environment is 3.14) |
-| FFmpeg | Must be on `PATH`, or placed manually in the project folder |
+| FFmpeg | **Not required**: a bundled static build ships with the app; a full build on `PATH` is preferred when present |
 | GPU (optional) | NVIDIA GPU + CUDA 12.x; CPU-only also works, just slower |
 
 > Without an NVIDIA GPU, the program falls back to CPU inference automatically — just set the device to `cpu` or `auto` in Settings.
@@ -84,7 +84,7 @@ The UI has three tabs:
 3. The pipeline processes each entry sequentially. Status advances through the state machine:
 
    ```
-   queued → downloading → converting → transcribing → saving → done / failed
+   queued → downloading → converting → transcribing → extracting (optional) → saving → done / failed
    ```
 
 4. The task list shows live progress and a status badge; you can inspect or re-run individual failed items.
@@ -119,6 +119,7 @@ Besides Bilibili links, the tool can also transcribe local media files you uploa
 | Language | auto-detect / specify (e.g. `zh`) | Specifying `zh` for Chinese videos speeds up and reduces errors |
 | Keep audio | Whether to keep the downloaded raw audio | Turn off to save disk |
 | VAD | Voice activity detection (Silero) | On by default; auto-disabled and retried for music-only content |
+| Illustrated notes | Detects scene changes (e.g. slide flips), captures keyframes and pairs them with subtitles | Recommended for lectures; Bilibili tasks switch to downloading the video stream (much larger than audio-only) |
 | Output directory | Where subtitles are written | Defaults to `output/`; an absolute path is allowed |
 
 ---
@@ -132,8 +133,16 @@ output/{BV id}_{title}/
 ├── {part title}.srt      # Timestamped subtitles (import into editors)
 ├── {part title}.txt      # Plain text transcript
 ├── {part title}.md       # Markdown with timestamps
-└── {part title}.m4a      # Raw audio (keep-audio setting)
+├── {part title}.m4a      # Raw audio (keep-audio setting)
+├── {part title}.notes.md            # Illustrated notes (optional, enabled in settings)
+└── {part title}_frames/slide_*.jpg  # Keyframe screenshots (move together with notes.md)
 ```
+
+### Illustrated notes
+
+- Each page = timestamp heading (clickable, jumps back to that moment in the video) + keyframe screenshot + the subtitles spoken while that slide was on screen.
+- Local uploads / Kuaishou jobs use the original video directly; Bilibili jobs switch to downloading the video stream (audio is then extracted from it, so the content is not downloaded twice; stream merging is handled by the bundled ffmpeg).
+- Note-generation failures never fail the job itself (check the log diary); pure-audio files are skipped automatically.
 
 ---
 

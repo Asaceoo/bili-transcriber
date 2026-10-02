@@ -40,29 +40,92 @@ for _f in ANACONDA.glob("api-ms-win-*.dll"):
     if _f.is_file():
         binaries.append((str(_f), "."))
 
-# ---------- 收集 nvidia DLL ----------
-for pkg in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
-    src = VENV_SP / "nvidia" / pkg / "bin"
-    dst = f"nvidia/{pkg}/bin"
-    if src.is_dir():
-        for f in src.iterdir():
-            if f.suffix.lower() == ".dll":
-                binaries.append((str(f), dst))
+# ---------- nvidia CUDA DLL 不再打包(模型/GPU 运行时外置) ----------
+# v0.1.15 起:核心包为 CPU-only,GPU 加速改为独立「GPU 加速包 zip」
+# (bili-transcriber-gpu-<ver>.zip,由 release.py 生成),用户按需下载解压到
+# %LOCALAPPDATA%\Bili Note\gpu\ 目录;app/gpu_runtime.py 检测到才注册 DLL 启用 CUDA。
+# 这使核心包体积从 ~2.3GB 降到 ~300MB 级(本体 266MB)。
 
 # ---------- 收集 NiceGUI 静态资源 ----------
-datas = collect_data_files("nicegui") + collect_data_files("faster_whisper")
+# nagisa 是 qwen-asr 强制对齐器的依赖,其 __init__ 导入时即实例化 Tagger()(需 data/ 模型文件),
+# 故必须收集其子模块与 data 目录,否则打包后 import qwen_asr 会因缺失 nagisa 资源而失败。
+datas = (
+    collect_data_files("nicegui")
+    + collect_data_files("faster_whisper")
+    # sherpa-onnx 的 onnxruntime.dll / sherpa-onnx-c-api.dll 位于 lib/ 子目录,
+    # 必须作为数据收集,否则打包后 import sherpa_onnx 报 DLL load failed。
+    + collect_data_files("sherpa_onnx")
+    # nagisa 用绝对导入(import prepro/model/mecab_system_eval)+ sys.path.append(自身目录),
+    # 必须把 .py 也作为松散文件收集,否则打包后 import nagisa 报 No module named 'prepro'。
+    + collect_data_files("nagisa", include_py_files=True)
+    + collect_data_files("qwen_asr")  # 含 inference/assets/korean_dict_jieba.dict(强制对齐器运行时读取)
+    # imageio-ffmpeg 随包静态 ffmpeg(讲义流合并/关键帧检测/转码回退)
+    + collect_data_files("imageio_ffmpeg")
+    # 应用图标(app_256.png 供窗口 favicon 使用;main.py 冻结运行时从 _internal/frozen 加载)
+    + [(str(PROJECT / "app" / "assets"), "app/assets")]
+)
 
 # ---------- 隐藏导入(动态加载的子模块) ----------
 hiddenimports = (
     collect_submodules("nicegui")
     + collect_submodules("faster_whisper")
     + collect_submodules("ctranslate2")
+    + collect_submodules("sherpa_onnx")
+    + collect_submodules("nagisa")
+    + collect_submodules("dynet")
     + [
+        # qwen_asr 的 inference/core 子包是 PEP420 命名空间包(无 __init__.py),
+        # collect_submodules 走 pkgutil.walk_packages 只能找到 __main__,必须逐个显式列出,
+        # 否则打包后 from qwen_asr import Qwen3ASRModel 报 ModuleNotFoundError。
+        "qwen_asr",
+        "qwen_asr.inference",
+        "qwen_asr.inference.qwen3_asr",
+        "qwen_asr.inference.qwen3_forced_aligner",
+        "qwen_asr.inference.utils",
+        "qwen_asr.core",
+        "qwen_asr.core.transformers_backend",
+        "qwen_asr.core.transformers_backend.configuration_qwen3_asr",
+        "qwen_asr.core.transformers_backend.modeling_qwen3_asr",
+        "qwen_asr.core.transformers_backend.processing_qwen3_asr",
         "pywebview",
         "pywebview.platforms.edgechromium",
         "pywebview.platforms.win32",
         "yt_dlp",
+        "imageio_ffmpeg",
+        "imageio_ffmpeg.binaries",  # importlib.resources 定位二进制需要它在 PYZ 里可导入
         "huggingface_hub",
+        "pystray",
+        # Qwen3-ASR 引擎(qwen-asr 延迟导入,需显式收集;transformers 大量使用
+        # lazy module,PyInstaller 官方 hook 无法完全收集,这里显式补充)
+        "transformers",
+        "transformers.activations",
+        "transformers.cache_utils",
+        "transformers.generation",
+        "transformers.generation.beam_constraints",
+        "transformers.generation.beam_search",
+        "transformers.generation.candidate_generator",
+        "transformers.generation.configuration_utils",
+        "transformers.generation.logits_process",
+        "transformers.generation.stopping_criteria",
+        "transformers.generation.streamers",
+        "transformers.generation.utils",
+        "transformers.generation.watermarking",
+        "transformers.integrations",
+        "transformers.masking_utils",
+        "transformers.modeling_flash_attention_utils",
+        "transformers.modeling_layers",
+        "transformers.modeling_outputs",
+        "transformers.modeling_rope_utils",
+        "transformers.modeling_utils",
+        "transformers.models.auto",
+        "transformers.processing_utils",
+        "transformers.utils.deprecation",
+        "transformers.utils.generic",
+        "accelerate",
+        "torch",
+        "nagisa",
+        "dynet",
+        "_dynet",
     ]
 )
 
@@ -74,10 +137,12 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(PROJECT / "build" / "preload_transformers.py")],
     excludes=[
-        "tkinter", "matplotlib", "scipy", "PIL",
+        "tkinter", "matplotlib", "sklearn",
         "IPython", "jupyter", "notebook",
+        # CUDA 相关重型依赖在核心包中不打包(已外置为 GPU 加速包)
+        "nvidia.cublas", "nvidia.cudnn", "nvidia.cuda_nvrtc",
     ],
     noarchive=False,
 )
@@ -100,6 +165,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(PROJECT / "app" / "assets" / "app.ico"),
 )
 
 coll = COLLECT(

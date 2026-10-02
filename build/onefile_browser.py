@@ -6,13 +6,16 @@
    因此单文件版默认改用浏览器模式(打开默认浏览器访问本地 UI),渲染 100% 可靠。
    设 BILI_FORCE_NATIVE=1 可强制原生窗口。
 
-2. 强制 CPU 转写:
+2. CPU/GPU 自适应(v0.1.15+):
    faster-whisper / ctranslate2 在 Windows 上用 CUDA_DYNAMIC_LOADING=ON 编译,
    即使 device=cpu 也会在模块 import 时尝试 LoadLibrary('cublas64_12.dll')/
-   'cublas64_11.dll' 探测 GPU。单文件版打包不含这些 CUDA 运行时(~2GB),
-   DLL 缺失即抛 'Library cublas64_12.dll is not found'。在 hook 里预先 import
-   ctranslate2 并 monkey-patch get_cuda_device_count() -> 0,绕开 CUDA 探测;
-   同时设置 BILI_DEVICE=cpu 让 transcriber 强制走 int8 CPU 路径。
+   'cublas64_11.dll' 探测 GPU。单文件版打包不含 CUDA 运行时(已外置为 GPU 加速包),
+   DLL 缺失即抛 'Library cublas64_12.dll is not found'。
+
+   hook 启动时检测 GPU 加速包(%LOCALAPPDATA%/Bili Note/gpu/,v0.1.15 起):
+   - 已放置 → 放行,由 app.gpu_runtime 注册 DLL 并启用 CUDA(auto 检测);
+   - 未放置 → 预先 import ctranslate2 并 monkey-patch get_cuda_device_count() -> 0,
+     绕开 CUDA 探测;同时设置 BILI_DEVICE=cpu 让 transcriber 强制走 int8 CPU 路径。
 
    设 BILI_FORCE_GPU=1 可强制 GPU(需目标机已装 CUDA/cuBLAS 运行时 DLL)。
 """
@@ -39,10 +42,23 @@ def _force_browser_mode() -> None:
         _log("force browser mode for onefile")
 
 
+def _gpu_pack_present() -> bool:
+    """GPU 加速包是否已就位(%LOCALAPPDATA%/Bili Note/gpu/,cublas64_12.dll 为标记)。"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.isfile(
+        os.path.join(base, "Bili Note", "gpu", "nvidia", "cublas", "bin", "cublas64_12.dll")
+    )
+
+
 def _force_cpu_whisper() -> None:
-    """预先 import ctranslate2 并 patch get_cuda_device_count,避免 LoadLibrary cublas 失败。"""
+    """CPU/GPU 自适应:GPU 包已放置则放行,否则强制 CPU 并屏蔽 CUDA 探测。"""
     if os.environ.get("BILI_FORCE_GPU"):
         _log("BILI_FORCE_GPU set, keep GPU mode (target needs CUDA/cuBLAS runtime)")
+        return
+    # v0.1.15+:GPU 加速包外置。已放置时放行 auto 检测,由 app.gpu_runtime
+    # 注册 DLL 路径并启用 CUDA;未放置才强制 CPU。
+    if _gpu_pack_present():
+        _log("GPU 加速包已就绪,放行 GPU 自动检测")
         return
     try:
         import ctranslate2  # noqa: F401  # 触发模块加载,后续 patch 才能生效

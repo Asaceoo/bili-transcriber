@@ -62,13 +62,14 @@ bili-transcriber/
 
 ### 4.2 `pipeline.py` — 核心编排
 - **单工作线程串行**：所有条目在同一线程内顺序 `[下载 → 转码 → 转写 → 落盘]`，避免并发抢占 GPU 显存。
-- **状态机**：`queued → downloading → converting → transcribing → saving → done / failed`。
+- **状态机**：`queued → downloading → converting → transcribing → extracting(可选) → saving → done / failed`。
 - **转写全程持锁**：`transcriber.transcribe()` 期间持有锁，确保同一时刻只有一个转写任务使用模型/显存。
 - **断点续跑**：
   - 已下载的音频路径缓存于 `job.audio_path`；重跑时若文件仍存在则跳过下载。
   - 已转码的 WAV 缓存于 `job.wav_path`；重跑时若文件仍存在则跳过转码。
   - 任务失败重跑时，`progress` 重置、状态复位，但不重复下载/转码。
 - **缓存清理容错**（v0.1.1 修复）：落盘后删除中间产物（WAV）与可选原始音频时，若删除被环境安全策略（如沙箱回收站不可用）拦截抛出 `OSError`，**降级为 warning 日志，任务仍标记 `done`**，不再误判 `failed`。
+- **图文讲义**（`_generate_notes`，设置 `notes=true` 时）：落盘后用 PyAV 检测画面切换并截关键帧，与字幕段落对齐输出 `{stem}.notes.md`；失败仅记 warning 不影响任务成败（用户取消 `CancelledError` 仍向上传播）。视频源优先复用已有文件（本地上传 / 合一 mp4 下载），仅旧任务重跑缺视频时补下临时视频并在截帧后删除。
 
 ### 4.3 `downloader.py` — yt-dlp 封装
 - `probe(url)`：用 yt-dlp 探测链接，自动展开 **单 P / 多 P / 合集** 为条目列表（每个条目含 `media_id`、标题、URL）。
@@ -84,10 +85,18 @@ bili-transcriber/
 ### 4.5 `converter.py` — FFmpeg 封装
 - `to_wav16k_mono(src, dst)`：调用 FFmpeg 将任意音频转码为 **16kHz 单声道 16-bit WAV**（faster-whisper 的最佳输入格式）。
 - 通过 subprocess 调用，捕获 stderr 用于错误诊断。
+- ffmpeg 二进制经 `app/ffmpeg_bin.py` 解析：PATH 完整版优先，否则 imageio-ffmpeg 随包静态版（用户机器无需安装 ffmpeg）。
 
 ### 4.6 `writers.py` — 产物落盘
 - `write_srt / write_txt / write_md`：分别输出时间戳字幕、纯文本、带时间戳 Markdown。
+- `build_slide_sections / write_notes_md`：把字幕按"句子开始时所在画面"分到各关键帧页（每句只出现一次），输出图文讲义 `{stem}.notes.md` + `{stem}_frames/slide_XXX.jpg`（相对路径引用）。
 - 输出目录结构：`{output_dir}/{BV id}_{title}/{part title}.{ext}`。
+
+### 4.6.1 `keyframes.py` — 关键帧提取（双后端）
+- **ffmpeg 后端（优先）**：`select='gte(scene,0)'` 让全部帧通过并计算 scene_score，`metadata=print` 把每帧 `pts_time` + 分数打到 stderr，Python 流式解析（阈值判断在 Python 侧，且逐帧回调支撑进度/取消）；切换点用 `-ss 前置 -frames:v 1` 快照。阈值 0.11，与 PyAV 后端 MAD=15 灵敏度等价（实测标定：纯色翻转 MAD 39 ↔ score 0.29）。
+- **PyAV 后端（回退）**：逐帧缩成 64x36 灰度小图，与前一帧的平均绝对差（MAD，0-255）超过 15 判定为切换。
+- 公共策略：首帧必截；每次切换后 0.4s 截取（等翻页动画稳定）；两帧最小间隔 5s（防渐变/动画重复）；上限 400 帧。
+- ffmpeg 缺失/启动失败自动回退 PyAV；`KeyframeError`（无视频流等已判定问题）与用户取消 `CancelledError` 不回退、直接上抛。
 
 ### 4.7 `store.py` — 存储
 - **SQLite**（`data/history.db`）：历史任务索引，`UPSERT` 主键为 `media_id`，记录状态、进度、输出路径。

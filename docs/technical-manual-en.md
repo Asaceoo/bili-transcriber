@@ -62,13 +62,14 @@ bili-transcriber/
 
 ### 4.2 `pipeline.py` — Core Orchestration
 - **Single serial worker thread**: all entries are processed sequentially `[download → transcode → transcribe → write]` to avoid concurrent GPU VRAM contention.
-- **State machine**: `queued → downloading → converting → transcribing → saving → done / failed`.
+- **State machine**: `queued → downloading → converting → transcribing → extracting (optional) → saving → done / failed`.
 - **Transcription lock**: `transcriber.transcribe()` holds a lock so only one job uses the model/VRAM at a time.
 - **Resume**:
   - Downloaded audio path is cached in `job.audio_path`; re-run skips download if the file still exists.
   - Transcoded WAV is cached in `job.wav_path`; re-run skips transcode if the file still exists.
   - On re-run after failure, `progress` resets and status clears, but download/transcode are not repeated.
 - **Cache-cleanup fault tolerance** (v0.1.1 fix): when deleting intermediate WAV and optional raw audio after writing, if deletion is blocked by an environment safety policy (e.g. sandbox recycle bin unavailable) raising `OSError`, it is **downgraded to a warning log and the job is still marked `done`** instead of being mislabeled `failed`.
+- **Illustrated notes** (`_generate_notes`, when setting `notes=true`): after writing outputs, detect scene changes with PyAV, capture keyframes, align them with subtitle segments and emit `{stem}.notes.md`. Failures only log a warning and never fail the job (user cancellation `CancelledError` still propagates). The video source reuses existing files when possible (local uploads / muxed mp4 downloads); a temporary video is downloaded only when a legacy re-run lacks one, and deleted after extraction.
 
 ### 4.3 `downloader.py` — yt-dlp Wrapper
 - `probe(url)`: use yt-dlp to probe a link and automatically expand **single-part / multi-part / collection** into a list of entries (each with `media_id`, title, URL).
@@ -84,10 +85,18 @@ bili-transcriber/
 ### 4.5 `converter.py` — FFmpeg Wrapper
 - `to_wav16k_mono(src, dst)`: invoke FFmpeg to transcode any audio into **16kHz mono 16-bit WAV** (the optimal faster-whisper input format).
 - Called via subprocess; stderr is captured for diagnostics.
+- The ffmpeg binary is resolved via `app/ffmpeg_bin.py`: a full build on `PATH` is preferred, otherwise the bundled static build from imageio-ffmpeg (no user-side ffmpeg install needed).
 
 ### 4.6 `writers.py` — Output Writers
 - `write_srt / write_txt / write_md`: emit timestamped subtitles, plain text, and timestamped Markdown respectively.
+- `build_slide_sections / write_notes_md`: assign each subtitle to the keyframe page active when the sentence started (each sentence appears exactly once) and emit the illustrated notes `{stem}.notes.md` + `{stem}_frames/slide_XXX.jpg` (relative-path references).
 - Output layout: `{output_dir}/{BV id}_{title}/{part title}.{ext}`.
+
+### 4.6.1 `keyframes.py` — Keyframe Extraction (dual backend)
+- **ffmpeg backend (preferred)**: `select='gte(scene,0)'` lets every frame through while computing scene_score; `metadata=print` streams per-frame `pts_time` + score to stderr, parsed line-by-line in Python (thresholding stays in Python and the per-frame callback drives progress/cancel). Each capture point is snapped with `-ss` (input seek) + `-frames:v 1`. Threshold 0.11, calibrated equivalent to the PyAV backend's MAD=15 (measured: solid-color flip = MAD 39 ↔ score 0.29).
+- **PyAV backend (fallback)**: each frame is downscaled to a 64x36 grayscale thumbnail; a mean-absolute-difference above 15 versus the previous frame marks a scene change.
+- Shared policy: first frame always captured; 0.4s settle delay after each change; minimum 5s between captures; capped at 400 frames.
+- Falls back to PyAV automatically when ffmpeg is missing or fails to start; `KeyframeError` (definitive findings such as no video stream) and user cancellation (`CancelledError`) propagate without fallback.
 
 ### 4.7 `store.py` — Storage
 - **SQLite** (`data/history.db`): history index, `UPSERT` keyed on `media_id`, recording status, progress, and output paths.

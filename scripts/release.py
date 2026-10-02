@@ -63,6 +63,12 @@ def do_bump() -> str:
     iss = ISS.read_text(encoding="utf-8")
     iss = re.sub(r'^AppVersion=[\d.]+', f'AppVersion={new}', iss, count=1, flags=re.M)
     ISS.write_text(iss, encoding="utf-8")
+    # 同步 app/__init__.py 的 APP_VERSION(设置页"关于与帮助"展示;保持三处一致)
+    app_init = ROOT / "app" / "__init__.py"
+    src = app_init.read_text(encoding="utf-8")
+    src2 = re.sub(r'^APP_VERSION = "[\d.]+"', f'APP_VERSION = "{new}"', src, count=1, flags=re.M)
+    if src2 != src:
+        app_init.write_text(src2, encoding="utf-8")
     print(f"[release] 版本 bump {m.group(0)} -> {new}")
     return new
 
@@ -189,11 +195,45 @@ def do_singlefile(ver: str) -> Path | None:
     return dst
 
 
+def do_gpu_pack(ver: str) -> Path | None:
+    """GPU 加速包 zip:v0.1.15 起 CUDA 运行时外置,用户按需下载解压到
+    %LOCALAPPDATA%/Bili Note/gpu(默认),app/gpu_runtime.py 自动检测注册。
+
+    从 venv 的 nvidia site-packages 收集 DLL,保持 nvidia/<pkg>/bin 布局
+    (与 PyInstaller 原布局一致,解压后即得标准结构)。
+    """
+    nv_root = ROOT / ".venv" / "Lib" / "site-packages" / "nvidia"
+    if not nv_root.is_dir():
+        print(f"[release] !! 未找到 venv 内 nvidia 目录,跳过 GPU 包: {nv_root}")
+        return None
+    zf = DIST / f"bili-transcriber-gpu-{ver}.zip"
+    n = 0
+    total = 0
+    with zipfile.ZipFile(zf, "w", zipfile.ZIP_DEFLATED) as z:
+        for pkg in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime"):
+            src = nv_root / pkg / "bin"
+            if not src.is_dir():
+                continue
+            for f in sorted(src.iterdir()):
+                if f.suffix.lower() != ".dll":
+                    continue
+                arc = f"nvidia/{pkg}/bin/{f.name}"
+                z.write(f, arc)
+                n += 1
+                total += f.stat().st_size
+    if n == 0:
+        print("[release] !! GPU 包未收集到任何 DLL,中止")
+        return None
+    print(f"[release] GPU 加速包: {zf.name} ({n} 个 DLL,{total/1e9:.2f} GB 原始)")
+    return zf
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="bili-transcriber 一键发布")
     ap.add_argument("--wheel-only", action="store_true", help="bump + 构建 wheel(快速交付)")
     ap.add_argument("--bin-only", action="store_true", help="仅便携版 + 安装包(版本已定)")
     ap.add_argument("--single-only", action="store_true", help="仅重建单文件便携版(版本已定,用于验证/复现)")
+    ap.add_argument("--setup-only", action="store_true", help="bump + 构建 onedir + 安装包(不发 portable zip/single/gpu)")
     args = ap.parse_args()
 
     # 构建目录(build/、dist/)均为可重建的临时产物,PyInstaller/Inno 在收尾阶段
@@ -203,9 +243,9 @@ def main() -> None:
 
     DIST.mkdir(exist_ok=True)
 
-    if args.bin_only or args.single_only:
+    if args.bin_only or args.single_only or args.setup_only:
         ver = read_version()
-        print(f"[release] {('bin-only' if args.bin_only else 'single-only')}: 使用现有版本 {ver}")
+        print(f"[release] {('bin-only' if args.bin_only else ('single-only' if args.single_only else 'setup-only'))}: 使用现有版本 {ver}")
         whl: Path | None = None
     else:
         ver = do_bump()
@@ -226,9 +266,33 @@ def main() -> None:
         print(f"[release] 版本 {ver} 发布流程结束")
         return
 
+    if args.setup_only:
+        # 仅构建 onedir(安装包输入) + 安装包;不发 portable zip / single / gpu
+        src = DIST / "bili-transcriber"
+        spec = ROOT / "build" / "bili-transcriber.spec"
+        _evacuate(src)
+        _evacuate(ROOT / "build" / "bili-transcriber")
+        start = time.time()
+        try:
+            subprocess.run([PYINSTALLER, "--noconfirm", str(spec)], check=True, cwd=str(ROOT))
+        except subprocess.CalledProcessError as exc:
+            print(f"[release] PyInstaller 退出码非 0(可能为沙箱清理拦截): {exc}")
+        if not _built_fresh(src / "bili-transcriber.exe", start):
+            print("[release] !! onedir 构建产物不存在/非全新(陈旧风险),中止安装包打包")
+            return
+        if not (src / "_internal").is_dir():
+            print("[release] !! onedir _internal 缺失,产物不完整,中止安装包打包")
+            return
+        setup = do_setup(ver)
+        print("[release] ===== 产物清单 =====")
+        print(f"  {setup.name if setup else '(失败)'} <- 安装包")
+        print(f"[release] 版本 {ver} 发布流程结束(setup-only)")
+        return
+
     portable = do_portable(ver)
     setup = do_setup(ver)
     single = do_singlefile(ver)
+    gpu = do_gpu_pack(ver)
 
     print("[release] ===== 产物清单 =====")
     for p in sorted(DIST.glob("*")):
@@ -241,6 +305,8 @@ def main() -> None:
             tag = " <- 安装包"
         elif single and p == single:
             tag = " <- 单文件便携版"
+        elif gpu and p == gpu:
+            tag = " <- GPU 加速包(外置,用户按需下载)"
         print(f"  {p.name}{tag}")
     print(f"[release] 版本 {ver} 发布流程结束")
 
