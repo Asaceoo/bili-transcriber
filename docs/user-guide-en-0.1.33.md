@@ -5,7 +5,7 @@
 
 Everything runs **100% locally** — audio and subtitles never leave your machine. Ideal for privacy-sensitive or offline batch workflows.
 
-> This guide matches **v0.1.33**. The versioned release copy is [user-guide-en-0.1.33.md](user-guide-en-0.1.33.md).
+> 发布版本快照 **v0.1.33** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ---
 

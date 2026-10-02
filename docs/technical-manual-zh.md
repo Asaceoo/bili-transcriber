@@ -1,7 +1,7 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。说明架构、模块职责、并发模型、数据流、安全机制、构建发布流程与测试体系。
-> 本手册对应 **v0.1.32**。带版本号的发布版手册见 [technical-manual-zh-0.1.32.md](technical-manual-zh-0.1.32.md)。
+> 本手册对应 **v0.1.33**。带版本号的发布版手册见 [technical-manual-zh-0.1.33.md](technical-manual-zh-0.1.33.md)。
 
 ## 1. 系统概览
 
@@ -85,10 +85,10 @@ bili-transcriber/
 - 启动模式：默认浏览器模式（不依赖 WebView2，100% 可靠）；`BILI_FORCE_NATIVE=1` 时尝试 pywebview 原生窗口；`BILI_PORT` 覆盖端口（默认 8765）。
 
 ### 4.2 `pipeline.py` — 核心编排
-- **并发模型（v0.1.32）**：`WORKERS = 2` 工作线程并发取队列（下载/转码可重叠），**转写由三层锁保护**：
+- **并发模型（v0.1.33）**：`WORKERS = 2` 工作线程并发取队列（下载/转码可重叠），**转写由三层锁保护**：
   - `_model_lock`（pipeline）：保护 transcriber 实例的懒加载/替换（设置变更时重建）。
   - 引擎内部 `self._lock`：`transcribe()` 串行化，确保同一时刻只有一个任务占用模型/显存。
-  - 引擎 `load()` 为 **double-checked locking**：判空+加载整体在锁内，杜绝冷启动双加载（v0.1.32 修复，含三引擎并发回归测试）。
+  - 引擎 `load()` 为 **double-checked locking**：判空+加载整体在锁内，杜绝冷启动双加载（v0.1.32 起修复，含三引擎并发回归测试）。
 - **状态机**：`queued → downloading → converting → transcribing → extracting(可选) → saving → done / failed`；支持任务级暂停/取消（`task_control.py`）。
 - **断点续跑**：`audio_path` / `wav_path` 缓存复用，重跑跳过已完成的下载/转码。
 - **缓存清理容错**：删除中间产物被沙箱拦截抛 `OSError` 时降级 warning，任务仍 `done`。
@@ -197,7 +197,7 @@ python scripts/release.py --setup-only
 
 ## 9. 测试
 
-`tests/` 共 **21 个文件 / 243 用例**（v0.1.32 全绿），覆盖：
+`tests/` 共 **21 个文件 / 243 用例**（v0.1.33 全绿），覆盖：
 
 | 领域 | 文件（示例） | 策略 |
 |------|--------------|------|

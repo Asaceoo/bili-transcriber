@@ -1,7 +1,7 @@
 # bili-transcriber Technical Manual (English)
 
 > For developers and maintainers. Covers architecture, module responsibilities, concurrency model, data flow, security mechanisms, build/release process, and the test suite.
-> This manual matches **v0.1.32**. The versioned release copy is [technical-manual-en-0.1.32.md](technical-manual-en-0.1.32.md).
+> This manual matches **v0.1.33**. The versioned release copy is [technical-manual-en-0.1.33.md](technical-manual-en-0.1.33.md).
 
 ## 1. Overview
 
@@ -85,10 +85,10 @@ bili-transcriber/
 - Launch mode: browser mode default (no WebView2 dependency); `BILI_FORCE_NATIVE=1` for pywebview; `BILI_PORT` overrides port (default 8765).
 
 ### 4.2 `pipeline.py` — Orchestration
-- **Concurrency (v0.1.32)**: `WORKERS = 2` threads drain the queue (download/convert overlap); **transcription protected by three lock layers**:
+- **Concurrency (v0.1.33)**: `WORKERS = 2` threads drain the queue (download/convert overlap); **transcription protected by three lock layers**:
   - `_model_lock` (pipeline): guards transcriber lazy-load/replacement on settings change.
   - Engine-level `self._lock`: serializes `transcribe()` so only one job holds model/VRAM.
-  - Engine `load()` uses **double-checked locking**: null-check + load inside the lock, eliminating cold-start double-loads (fixed in v0.1.32, with concurrency regression tests for all three engines).
+  - Engine `load()` uses **double-checked locking**: null-check + load inside the lock, eliminating cold-start double-loads (fixed since v0.1.32, with concurrency regression tests for all three engines).
 - **State machine**: `queued → downloading → converting → transcribing → extracting(optional) → saving → done / failed`; per-task pause/cancel via `task_control.py`.
 - **Resume-safe**: `audio_path` / `wav_path` cached and reused.
 - **Cleanup tolerance**: `OSError` from sandboxed deletion degrades to warning; job stays `done`.
@@ -197,7 +197,7 @@ python scripts/release.py --setup-only
 
 ## 9. Testing
 
-`tests/` contains **21 files / 243 cases** (all green at v0.1.32):
+`tests/` contains **21 files / 243 cases** (all green at v0.1.33):
 
 | Area | Files (examples) | Strategy |
 |------|------------------|----------|
