@@ -1,7 +1,7 @@
 # bili-transcriber Technical Manual (English)
 
 > For developers and maintainers. Covers architecture, module responsibilities, concurrency model, data flow, security mechanisms, build/release process, and the test suite.
-> This manual matches **v0.1.33**. The versioned release copy is [technical-manual-en-0.1.33.md](technical-manual-en-0.1.33.md).
+> This manual matches **v0.1.34**. The versioned release copy is [technical-manual-en-0.1.34.md](technical-manual-en-0.1.34.md).
 
 ## 1. Overview
 
@@ -85,7 +85,7 @@ bili-transcriber/
 - Launch mode: browser mode default (no WebView2 dependency); `BILI_FORCE_NATIVE=1` for pywebview; `BILI_PORT` overrides port (default 8765).
 
 ### 4.2 `pipeline.py` — Orchestration
-- **Concurrency (v0.1.33)**: `WORKERS = 2` threads drain the queue (download/convert overlap); **transcription protected by three lock layers**:
+- **Concurrency (v0.1.34)**: `WORKERS = 2` threads drain the queue (download/convert overlap); **transcription protected by three lock layers**:
   - `_model_lock` (pipeline): guards transcriber lazy-load/replacement on settings change.
   - Engine-level `self._lock`: serializes `transcribe()` so only one job holds model/VRAM.
   - Engine `load()` uses **double-checked locking**: null-check + load inside the lock, eliminating cold-start double-loads (fixed since v0.1.32, with concurrency regression tests for all three engines).
@@ -197,7 +197,7 @@ python scripts/release.py --setup-only
 
 ## 9. Testing
 
-`tests/` contains **21 files / 243 cases** (all green at v0.1.33):
+`tests/` contains **21 files / 243 cases** (all green at v0.1.34):
 
 | Area | Files (examples) | Strategy |
 |------|------------------|----------|
@@ -217,3 +217,26 @@ Run: `.venv\Scripts\pytest -q`
 - GPU acceleration covers the whisper engine (ctranslate2) only; Qwen3-ASR/SenseVoice run on CPU (Qwen slower).
 - In restricted sandboxes, PyInstaller re-runs may be blocked by safe-delete policies; final exe builds require a normal desktop environment.
 - The Kuaishou SSR parser depends on the share-page markup; site redesigns require updating `app/kuaishou.py`.
+
+
+---
+
+## 11. Companion Skills Repo & Universality Design
+
+The companion open-source repo `Asaceoo/bili-note-skills` owns the knowledge-building stage after transcription, and is orthogonal to this project in responsibility:
+
+| Project | Responsibility boundary | Stack |
+|---|---|---|
+| bili-transcriber (this project) | link → audio → local ASR → subtitle/transcript files | Python desktop app (NiceGUI + PyInstaller) |
+| bili-note-skills (companion) | transcript → archive / 6 learning artifacts → quality gate | Python stdlib scripts + Node gate script + Markdown instructions |
+
+**Universality contract (v1.1.0)** for downstream developers:
+
+1. **Single entry point**: one `SKILL.md` per skill with standard frontmatter (`name` + `description`) and plain-Markdown instructions — no platform-specific fields.
+2. **Zero third-party dependencies**: `bili-note` scripts use Python 3.10+ stdlib only; `bili-content-enhance/scripts/validate.js` uses Node built-ins only (`vm` / `fs` / `path`).
+3. **Path auto-detection**: no hardcoded agent directories; PowerShell and bash snippets both probe common skill dirs and fall back to a manual absolute path.
+4. **Browser channel abstracted to a CDP interface**: the logged-in route only needs `GET <cdp-base>/targets` and `GET <cdp-base>/eval?target=<id>` (default `http://localhost:3456`, overridable via `--cdp-base`); WorkBuddy `web-access` is just one implementation.
+5. **CI validation**: `.github/workflows/validate.yml` checks frontmatter completeness, absence of `__pycache__` / `.bak` leftovers, no hardcoded credentials, and no leaked machine-specific absolute paths.
+6. **De-branded tests**: assertions target the generic contract (CDP, `--cdp-base`, cross-platform compatibility section) instead of any specific vendor or browser.
+
+When chaining with this project, the transcript file (`.md` / `.txt` / `.srt`) is the only data contract; the skills never read this project's database, and this project never depends on the skills repo.

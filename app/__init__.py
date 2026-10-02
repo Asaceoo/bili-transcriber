@@ -6,7 +6,7 @@ from pathlib import Path
 
 # 应用版本号(单一维护点;scripts/release.py bump 时自动同步,
 # 保持与 pyproject.toml 的 version 一致,tests/test_main_helpers.py 有一致性校验)
-APP_VERSION = "0.1.33"
+APP_VERSION = "0.1.34"
 
 # Anaconda 等环境可能把 SSL_CERT_FILE 指向不存在的文件,会导致
 # httpx(模型下载)初始化失败;启动时清理指向失效路径的证书环境变量。

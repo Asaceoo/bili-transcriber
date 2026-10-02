@@ -10,7 +10,7 @@
 [Setup]
 AppId={{B1A2C3D4-E5F6-7890-ABCD-EF1234567890}
 AppName={#AppName}
-AppVersion=0.1.33
+AppVersion=0.1.34
 AppPublisher={#AppPublisher}
 ; 安装包/卸载程序图标
 SetupIconFile=..\app\assets\app.ico

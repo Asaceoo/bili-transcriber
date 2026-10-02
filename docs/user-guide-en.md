@@ -5,7 +5,7 @@
 
 Everything runs **100% locally** — audio and subtitles never leave your machine. Ideal for privacy-sensitive or offline batch workflows.
 
-> This guide matches **v0.1.33**. The versioned release copy is [user-guide-en-0.1.33.md](user-guide-en-0.1.33.md).
+> This guide matches **v0.1.34**. The versioned release copy is [user-guide-en-0.1.34.md](user-guide-en-0.1.34.md).
 
 ---
 
@@ -39,13 +39,13 @@ Everything runs **100% locally** — audio and subtitles never leave your machin
 ## 3. Installation (choose one)
 
 ### Option 1: Setup installer (recommended)
-Run `bili-transcriber-setup-0.1.33.exe` and follow the wizard.
+Run `bili-transcriber-setup-0.1.34.exe` and follow the wizard.
 
 ### Option 2: Portable package
-Unzip `bili-transcriber-portable-0.1.33.zip` anywhere and run `bili-transcriber.exe`. No registry writes — USB-drive friendly.
+Unzip `bili-transcriber-portable-0.1.34.zip` anywhere and run `bili-transcriber.exe`. No registry writes — USB-drive friendly.
 
 ### Option 3: Single-file build
-Run `bili-transcriber-single-0.1.33.exe` (CPU mode). Slower first launch due to self-extraction.
+Run `bili-transcriber-single-0.1.34.exe` (CPU mode). Slower first launch due to self-extraction.
 
 ### Option 4: Development mode
 ```powershell
@@ -55,7 +55,7 @@ python -m venv .venv
 ```
 
 ### GPU Acceleration Pack (optional)
-1. Download `bili-transcriber-gpu-0.1.33.zip` (~1.3 GB of CUDA runtime DLLs).
+1. Download `bili-transcriber-gpu-0.1.34.zip` (~1.3 GB of CUDA runtime DLLs).
 2. Extract into `%LOCALAPPDATA%\Bili Note\gpu\`.
 3. Restart the app — CUDA libraries are **auto-detected and registered**.
 
@@ -179,3 +179,29 @@ All processing is local. Only outbound traffic: model download (first run) and t
 ---
 
 *See also: [技术手册（中文）](technical-manual-zh.md) / [Technical Manual (English)](technical-manual-en.md).*
+
+
+---
+
+## 11. Companion AI Agent Skills (Universal)
+
+This tool covers "link → subtitles/transcript". The knowledge-building step afterwards is handled by the companion **universal AI agent skills** (open-source repo: [Asaceoo/bili-note-skills](https://github.com/Asaceoo/bili-note-skills)):
+
+| Skill | Purpose | Input → Output |
+|---|---|---|
+| `bili-note` | Fetch Bilibili subtitles / AI subtitles / comments; archive raw materials and evidence indexes | Bilibili URL → transcript + full archive |
+| `bili-content-enhance` | Turn a transcript into 6 learning artifacts (summary / glossary / knowledge map / animated HTML / extras / deep understanding) with a quality gate | transcript → learning pack (6 files) |
+
+**Universal edition (v1.1.0)**: the two skills are **not tied to any AI agent** — Claude Code, Cursor, Codex CLI, WPS AI, WorkBuddy, Cline and Gemini CLI can all use them as-is; assistants without a skills directory just paste `SKILL.md` into the system prompt; and they also run from a plain shell with no agent at all. Scripts have zero third-party dependencies (bili-note uses the Python stdlib only; the gate script uses Node built-ins only), and the logged-in route only needs a generic CDP interface (`GET /targets` and `GET /eval`, default `http://localhost:3456`).
+
+Install (pick the line for your platform):
+
+```bash
+git clone https://github.com/Asaceoo/bili-note-skills.git
+cp -r bili-note-skills/skills/bili-note ~/.claude/skills/            # WorkBuddy: ~/.workbuddy/skills/; Codex: ~/.codex/skills/
+cp -r bili-note-skills/skills/bili-content-enhance ~/.claude/skills/
+```
+
+Typical chain: export a `.md` / `.txt` / `.srt` transcript with this tool → hand the file to any AI agent → say "generate a learning pack" → receive 6 artifacts → run `node scripts/validate.js <learning-pack-dir>` as the quality gate.
+
+Full documentation: [English manual](https://github.com/Asaceoo/bili-note-skills/blob/main/docs/manual-en.md).

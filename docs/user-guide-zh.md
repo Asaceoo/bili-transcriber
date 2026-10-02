@@ -5,7 +5,7 @@
 
 本工具**完全本地运行**，音频与字幕不会上传任何服务器，适合对隐私敏感或需要离线批量处理的场景。
 
-> 本手册对应 **v0.1.33**。带版本号的发布版手册见 [user-guide-zh-0.1.33.md](user-guide-zh-0.1.33.md)。
+> 本手册对应 **v0.1.34**。带版本号的发布版手册见 [user-guide-zh-0.1.34.md](user-guide-zh-0.1.34.md)。
 
 ---
 
@@ -42,13 +42,13 @@
 ## 3. 安装（四种方式任选其一）
 
 ### 方式一：安装版（推荐普通用户）
-双击 `bili-transcriber-setup-0.1.33.exe`，按向导完成安装。桌面/开始菜单生成快捷方式。
+双击 `bili-transcriber-setup-0.1.34.exe`，按向导完成安装。桌面/开始菜单生成快捷方式。
 
 ### 方式二：便携包
-解压 `bili-transcriber-portable-0.1.33.zip` 到任意目录，双击其中的 `bili-transcriber.exe` 即可。**不写注册表**，适合 U 盘携带或多机使用。
+解压 `bili-transcriber-portable-0.1.34.zip` 到任意目录，双击其中的 `bili-transcriber.exe` 即可。**不写注册表**，适合 U 盘携带或多机使用。
 
 ### 方式三：单文件版
-直接运行 `bili-transcriber-single-0.1.33.exe`（CPU 模式）。首次启动需解压，稍慢；追求 GPU 提速请用前两种。
+直接运行 `bili-transcriber-single-0.1.34.exe`（CPU 模式）。首次启动需解压，稍慢；追求 GPU 提速请用前两种。
 
 ### 方式四：开发模式（源码运行）
 ```powershell
@@ -60,7 +60,7 @@ python -m venv .venv
 ### GPU 加速包（可选）
 安装版 / 便携版默认为 CPU 推理。要让 Whisper 走 NVIDIA 显卡：
 
-1. 下载 `bili-transcriber-gpu-0.1.33.zip`（约 1.3 GB，内含 CUDA 运行库）。
+1. 下载 `bili-transcriber-gpu-0.1.34.zip`（约 1.3 GB，内含 CUDA 运行库）。
 2. 解压到 `%LOCALAPPDATA%\Bili Note\gpu\` 目录。
 3. 重启应用——程序**自动检测并注册** CUDA 库，无需配置环境变量。
 
@@ -203,3 +203,29 @@ VAD 只识别人声。程序遇此类内容会**自动关闭 VAD 重试**；若�
 ---
 
 *更多技术细节见 [技术手册（中文）](technical-manual-zh.md) / [Technical Manual (English)](technical-manual-en.md)。*
+
+
+---
+
+## 11. 配套 AI 智能体技能（通用版）
+
+本工具负责「链接 → 字幕/转录稿」，后续的知识化加工由配套的**通用 AI 智能体技能**完成（开源仓库：[Asaceoo/bili-note-skills](https://github.com/Asaceoo/bili-note-skills)）：
+
+| 技能 | 作用 | 输入 → 输出 |
+|---|---|---|
+| `bili-note` | 抓取 B 站字幕 / AI 字幕 / 评论，归档原始材料与证据索引 | B 站链接 → 转录稿 + 完整归档 |
+| `bili-content-enhance` | 把转录稿增强为 6 类学习物料（智能摘要 / 术语表 / 知识导图 / 动画 HTML / 补充知识 / 深度理解），带质量门禁 | 转录稿 → 学习包（6 份物料） |
+
+**通用版特性（v1.1.0）**：两个技能**不绑定任何 AI 智能体** —— Claude Code、Cursor、Codex CLI、WPS AI、WorkBuddy、Cline、Gemini CLI 均可直接使用；不支持技能目录的助手把 `SKILL.md` 全文作为系统提示词即可；没有智能体时也能纯命令行执行。技能脚本零第三方依赖（bili-note 只用 Python 标准库，门禁脚本只用 Node 内置模块），登录态路线只要求一个通用 CDP 接口（`GET /targets` 与 `GET /eval`，默认 `http://localhost:3456`）。
+
+安装（按平台选一行）：
+
+```bash
+git clone https://github.com/Asaceoo/bili-note-skills.git
+cp -r bili-note-skills/skills/bili-note ~/.claude/skills/            # WorkBuddy: ~/.workbuddy/skills/；Codex: ~/.codex/skills/
+cp -r bili-note-skills/skills/bili-content-enhance ~/.claude/skills/
+```
+
+典型串联：本工具导出 `.md` / `.txt` / `.srt` 转录稿 → 把文件交给任意 AI 智能体 → 说「用提示词跑一份文档 / 生成学习包」→ 得到 6 份物料的学习包 → `node scripts/validate.js <学习包目录>` 跑质量门禁。
+
+完整说明见技能仓库的 [中文手册](https://github.com/Asaceoo/bili-note-skills/blob/main/docs/manual-zh.md)。

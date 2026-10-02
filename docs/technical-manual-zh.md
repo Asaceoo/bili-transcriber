@@ -1,7 +1,7 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。说明架构、模块职责、并发模型、数据流、安全机制、构建发布流程与测试体系。
-> 本手册对应 **v0.1.33**。带版本号的发布版手册见 [technical-manual-zh-0.1.33.md](technical-manual-zh-0.1.33.md)。
+> 本手册对应 **v0.1.34**。带版本号的发布版手册见 [technical-manual-zh-0.1.34.md](technical-manual-zh-0.1.34.md)。
 
 ## 1. 系统概览
 
@@ -85,7 +85,7 @@ bili-transcriber/
 - 启动模式：默认浏览器模式（不依赖 WebView2，100% 可靠）；`BILI_FORCE_NATIVE=1` 时尝试 pywebview 原生窗口；`BILI_PORT` 覆盖端口（默认 8765）。
 
 ### 4.2 `pipeline.py` — 核心编排
-- **并发模型（v0.1.33）**：`WORKERS = 2` 工作线程并发取队列（下载/转码可重叠），**转写由三层锁保护**：
+- **并发模型（v0.1.34）**：`WORKERS = 2` 工作线程并发取队列（下载/转码可重叠），**转写由三层锁保护**：
   - `_model_lock`（pipeline）：保护 transcriber 实例的懒加载/替换（设置变更时重建）。
   - 引擎内部 `self._lock`：`transcribe()` 串行化，确保同一时刻只有一个任务占用模型/显存。
   - 引擎 `load()` 为 **double-checked locking**：判空+加载整体在锁内，杜绝冷启动双加载（v0.1.32 起修复，含三引擎并发回归测试）。
@@ -197,7 +197,7 @@ python scripts/release.py --setup-only
 
 ## 9. 测试
 
-`tests/` 共 **21 个文件 / 243 用例**（v0.1.33 全绿），覆盖：
+`tests/` 共 **21 个文件 / 243 用例**（v0.1.34 全绿），覆盖：
 
 | 领域 | 文件（示例） | 策略 |
 |------|--------------|------|
@@ -217,3 +217,26 @@ python scripts/release.py --setup-only
 - Qwen3-ASR/SenseVoice 的 Qwen 为 CPU 可跑但慢；GPU 提速仅覆盖 whisper 引擎（ctranslate2）。
 - 沙箱/受限环境下 PyInstaller 重跑可能被安全删除策略拦截，最终 exe 构建需在本机完成。
 - 快手 SSR 解析依赖分享页结构，站点改版需同步更新 `app/kuaishou.py`。
+
+
+---
+
+## 11. 配套技能仓库与通用化设计
+
+配套开源仓库 `Asaceoo/bili-note-skills` 承载「转录稿之后」的知识化加工，与本项目在职责上正交：
+
+| 项目 | 职责边界 | 技术栈 |
+|---|---|---|
+| bili-transcriber（本项目） | 链接 → 音频 → 本地 ASR → 字幕/转录稿文件 | Python 桌面应用（NiceGUI + PyInstaller） |
+| bili-note-skills（配套） | 转录稿 → 归档 / 6 类学习物料 → 质量门禁 | Python 标准库脚本 + Node 门禁脚本 + Markdown 指令 |
+
+**通用化契约（v1.1.0）**，供二次开发者遵循：
+
+1. **入口唯一**：每个技能只有一个入口 `SKILL.md`，标准 frontmatter（`name` + `description`），正文为纯 Markdown 指令，不含任何平台专有字段。
+2. **零第三方依赖**：`bili-note` 全部脚本只用 Python 3.10+ 标准库；`bili-content-enhance/scripts/validate.js` 只用 Node 内置模块（`vm` / `fs` / `path`）。
+3. **路径自动探测**：不再硬编码任何智能体目录，PowerShell 与 bash 各给一份探测写法，找不到时提示手填绝对路径。
+4. **浏览器通道抽象为 CDP 接口**：登录态路线只依赖 `GET <cdp-base>/targets` 与 `GET <cdp-base>/eval?target=<id>`（默认 `http://localhost:3456`，`--cdp-base` 可覆盖），WorkBuddy 的 `web-access` 只是其中一种实现。
+5. **CI 校验**：`.github/workflows/validate.yml` 校验 frontmatter 完整性、无 `__pycache__`/`.bak` 残留、无硬编码凭据、无本机绝对路径泄漏。
+6. **测试去品牌化**：断言只针对通用契约（CDP、`--cdp-base`、跨平台兼容章节），不再断言具体品牌或浏览器。
+
+与本项目串联时，转录稿文件（`.md` / `.txt` / `.srt`）即两侧唯一的数据契约；配套技能不读取本项目数据库，本项目也不依赖技能仓库。
