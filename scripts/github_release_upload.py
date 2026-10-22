@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
@@ -34,7 +35,7 @@ def _token() -> str:
     raise RuntimeError("git credential manager 中未找到 github.com 的 token")
 
 
-def _api(method: str, url: str, token: str, data: dict | bytes | None = None,
+def _api(method: str, url: str, token: str, data: dict | bytes | io.BufferedReader | None = None,
          headers: dict | None = None):
     body = None
     h = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
@@ -44,9 +45,11 @@ def _api(method: str, url: str, token: str, data: dict | bytes | None = None,
     if data is not None:
         if isinstance(data, bytes):
             body = data
-        else:
+        elif isinstance(data, dict):
             body = json.dumps(data).encode()
             h.setdefault("Content-Type", "application/json")  # 缺此头 GitHub 会 422 "is not an object"
+        else:
+            body = data  # 二进制文件流(dict/bytes 之外的 IO 对象,urllib 原生支持流式发送)
     req = urllib.request.Request(url, data=body, method=method, headers=h)
     try:
         with urllib.request.urlopen(req) as resp:
