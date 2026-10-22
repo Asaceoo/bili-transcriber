@@ -1,7 +1,7 @@
 # bili-transcriber Technical Manual (English)
 
 > For developers and maintainers. Covers architecture, module responsibilities, concurrency model, data flow, security mechanisms, build/release process, and the test suite.
-> This manual matches **v0.1.34**. The versioned release copy is [technical-manual-en-0.1.34.md](technical-manual-en-0.1.34.md).
+> This manual matches **v0.1.36**. The versioned release copy is [technical-manual-en-0.1.36.md](technical-manual-en-0.1.36.md).
 
 ## 1. Overview
 

@@ -1,7 +1,7 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。说明架构、模块职责、并发模型、数据流、安全机制、构建发布流程与测试体系。
-> 本手册对应 **v0.1.34**。带版本号的发布版手册见 [technical-manual-zh-0.1.34.md](technical-manual-zh-0.1.34.md)。
+> 本手册对应 **v0.1.36**。带版本号的发布版手册见 [technical-manual-zh-0.1.36.md](technical-manual-zh-0.1.36.md)。
 
 ## 1. 系统概览
 

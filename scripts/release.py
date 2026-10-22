@@ -255,13 +255,19 @@ def snapshot_docs(ver: str) -> list[Path]:
         text = src.read_text(encoding="utf-8")
         lines = text.splitlines()
         marker = f"**v{ver}**"
+        replaced = False
         for i, line in enumerate(lines):
             if marker in line and ("对应" in line or "matches" in line):
                 lines[i] = (
                     f"> 发布版本快照 **v{ver}** — 由 `scripts/release.py` 自动生成,"
                     "版本号取自 `pyproject.toml` 单一来源。"
                 )
+                replaced = True
                 break
+        if not replaced:
+            # 滚动版头部声明版本落后于源码版本时在此暴露,避免快照带过期声明
+            print(f"[release] !! 警告: {src_name} 头部无「对应/matches **v{ver}**」声明行,"
+                  f"快照保留原头部(请把滚动版手册头部版本更新到 v{ver})")
         dst = ROOT / "docs" / pat.format(ver=ver)
         dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
         out.append(dst)
