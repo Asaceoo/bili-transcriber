@@ -41,7 +41,11 @@ def _api(method: str, url: str, token: str, data: dict | bytes | None = None,
     if headers:
         h.update(headers)
     if data is not None:
-        body = data if isinstance(data, bytes) else json.dumps(data).encode()
+        if isinstance(data, bytes):
+            body = data
+        else:
+            body = json.dumps(data).encode()
+            h.setdefault("Content-Type", "application/json")  # 缺此头 GitHub 会 422 "is not an object"
     req = urllib.request.Request(url, data=body, method=method, headers=h)
     try:
         with urllib.request.urlopen(req) as resp:
