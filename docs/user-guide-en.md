@@ -5,7 +5,7 @@
 
 Everything runs **100% locally** — audio and subtitles never leave your machine. Ideal for privacy-sensitive or offline batch workflows.
 
-> This guide matches **v0.1.36**. The versioned release copy is [user-guide-en-0.1.36.md](user-guide-en-0.1.36.md).
+> This guide matches **v0.1.38**. The versioned release copy is [user-guide-en-0.1.38.md](user-guide-en-0.1.38.md).
 
 ---
 

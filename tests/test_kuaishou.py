@@ -32,8 +32,16 @@ def test_photo_id_from_url_fallback():
 
 
 def test_photo_id_default():
+    """兜底 id 必须基于 URL 哈希:media_id 是历史库主键,固定值会让两个
+    不同视频互相顶替(第二个被"已存在,跳过"错误跳过)。"""
+    import hashlib
     html = "<html><body>nothing</body></html>"
-    assert kuaishou._photo_id(html, "https://v.kuaishou.com/xyz") == "kuaishou_video"
+    id1 = kuaishou._photo_id(html, "https://v.kuaishou.com/xyz")
+    id2 = kuaishou._photo_id(html, "https://v.kuaishou.com/xyz")
+    id3 = kuaishou._photo_id(html, "https://v.kuaishou.com/abc")
+    assert id1 == id2, "同 URL 必须稳定(断点续跑可复用)"
+    assert id1 != id3, "不同 URL 必须不同 id(主键冲突会顶替任务)"
+    assert id1 == "ks_" + hashlib.sha1(b"https://v.kuaishou.com/xyz").hexdigest()[:16]
 
 
 def test_pick_mp4_prefers_hd():

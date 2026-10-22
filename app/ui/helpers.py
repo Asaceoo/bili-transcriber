@@ -29,7 +29,7 @@ def _notify(message: str, **kwargs) -> None:
     (_open_path/_rerun/删除确认等)在任何线程都不因通知失败而中断。
     """
     try:
-        _notify(message, **kwargs)
+        ui.notify(message, **kwargs)
     except Exception:  # noqa: BLE001 — 通知失败只影响提示,不影响动作本身
         logger.info("notify(无UI上下文): %s", message)
 

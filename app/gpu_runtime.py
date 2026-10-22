@@ -28,6 +28,9 @@ GPU_DIR_NAME = "gpu"
 # os.add_dll_directory 返回的句柄必须保持存活,否则被 GC 回收后
 # DLL 搜索路径立即失效(表现为模型加载成功、转写时 cublas64_12.dll 加载失败)
 _dll_handles: list = []
+# 已注册过的 DLL 目录(绝对路径小写):register_gpu_runtime 在每次转写解析
+# 设备时都会被调用,不幂等的话同一路径会反复前置到 PATH,无限膨胀。
+_registered_dirs: set[str] = set()
 
 
 def default_gpu_dir() -> Path:
@@ -75,6 +78,11 @@ def register_gpu_runtime(gpu_dir: Path | str | None = None) -> bool:
             d = root / sub / "bin"
         if not d.is_dir():
             continue
+        key = str(d.resolve()).lower()
+        if key in _registered_dirs:
+            registered += 1  # 幂等:同目录不重复前置 PATH,但计入"已注册成功",
+            continue         # 否则二次调用返回 False 会让调用方误判无 GPU 包
+        _registered_dirs.add(key)
         # ctranslate2 延迟加载 cuBLAS 不使用 Windows "安全搜索模式",
         # add_dll_directory 注册的目录对其不可见(实测 ctypes 能加载但转写仍失败);
         # 必须同时把目录前置到 PATH,二者并用。

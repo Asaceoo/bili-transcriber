@@ -241,8 +241,11 @@ def main_page() -> None:
             history_table.on("open-path", lambda e: _open_path(_first_arg(e.args)))
             history_table.on("rerun", lambda e: _rerun(_first_arg(e.args)))
             history_table.on("delete", lambda e: _confirm_delete(_first_arg(e.args)))
+            # 搜索框即时生效:定时器 refresh() 会带 search.value 过滤历史表
+            # (0.6s 内生效);这里额外挂 on_value_change 让输入回车/清空立即刷新。
+            search.on_value_change(lambda: _refresh_history())
 
-            def refresh_history() -> None:
+            def _refresh_history() -> None:
                 history_table.rows = [_job_row(j) for j in store.list_jobs(search.value or "")]
                 history_table.update()
 
@@ -334,7 +337,7 @@ def main_page() -> None:
                         ui.select({"": "自动检测", "zh": "中文", "en": "English"}, label="语言",
                                   value=settings.language).bind_value(settings, "language")
                     ui.switch("保留原始音频", value=settings.keep_audio).bind_value(settings, "keep_audio")
-                    ui.switch("VAD 人声过滤(静音不转写)", value=settings.vad).bind_value(settings, "vad")
+                    ui.switch("VAD 人声过滤(静音不转写;仅 Whisper 引擎生效)", value=settings.vad).bind_value(settings, "vad")
                     ui.switch("生成图文讲义(PPT 关键帧截图)", value=settings.notes).bind_value(settings, "notes")
                     ui.label(
                         "图文讲义:检测画面切换(如 PPT 翻页)截图,配对应时段字幕输出 {标题}.notes.md 讲义。\n"
@@ -534,7 +537,9 @@ def main_page() -> None:
         rows = [_job_row(j) for j in store.list_jobs()]
         active_table.rows = [r for r in rows if r["raw_status"] in ACTIVE_STATUSES]
         active_table.update()
-        history_table.rows = [r for r in rows if r["raw_status"] not in ACTIVE_STATUSES]
+        # 历史表带搜索过滤(空搜索 = 全部);进行中任务表不受搜索影响
+        filtered = [_job_row(j) for j in store.list_jobs(search.value or "")]
+        history_table.rows = [r for r in filtered if r["raw_status"] not in ACTIVE_STATUSES]
         history_table.update()
         # 长时间无进展提醒:转写/下载/转码超过阈值无进度更新时提示一次
         for r in rows:

@@ -74,33 +74,50 @@ def _read_wav(wav: Path) -> tuple[np.ndarray, int]:
 
 
 def _tokens_to_segments(tokens: list[str], timestamps: list[float],
-                        offset: float) -> list[Segment]:
+                        offset: float, chunk_duration: float = _CHUNK_SECONDS) -> list[Segment]:
     """把单块 token 流按句子边界切成带时间戳的片段(时间戳为块内相对秒,加 offset)。
 
-    时间戳缺失或与 token 数不一致时,片段时间戳用块内估算(不丢文本)。
-    返回空列表表示该块无有效文本。
+    时间戳缺失或与 token 数不一致时,按 token 数把块内实际时长顺序分配给
+    各句(两遍扫描:先统计块内 token 总量,再游标推进),片段互不重叠且
+    不超出本块;不丢文本。返回空列表表示该块无有效文本。
     """
-    segments: list[Segment] = []
-    ts_valid = len(timestamps) == len(tokens)
-    cur_tokens: list[str] = []
-    cur_ts: list[float] = []
-    for i, tok in enumerate(tokens):
-        cur_tokens.append(tok)
-        if ts_valid:
-            cur_ts.append(timestamps[i])
+    # 先按句子边界分组
+    groups: list[list[str]] = []
+    cur: list[str] = []
+    for tok in tokens:
+        cur.append(tok)
         if tok.strip() and tok.strip()[-1] in _SENTENCE_BOUNDARY:
-            seg = _make_segment(cur_tokens, cur_ts if ts_valid else [], offset)
+            groups.append(cur)
+            cur = []
+    if cur:
+        groups.append(cur)
+
+    ts_valid = len(timestamps) == len(tokens)
+    segments: list[Segment] = []
+    if ts_valid:
+        cursor = 0
+        for g in groups:
+            ts = timestamps[cursor:cursor + len(g)]
+            cursor += len(g)
+            seg = _make_segment_ts(g, ts, offset)
             if seg is not None:
                 segments.append(seg)
-            cur_tokens, cur_ts = [], []
-    if cur_tokens:
-        seg = _make_segment(cur_tokens, cur_ts if ts_valid else [], offset)
-        if seg is not None:
-            segments.append(seg)
+    else:
+        total = max(1, len(tokens))
+        k = chunk_duration / total  # 每 token 分摊时长
+        cursor = 0.0
+        for g in groups:
+            start = offset + min(cursor, chunk_duration)
+            cursor += len(g) * k
+            end = offset + min(cursor, chunk_duration)
+            text = "".join(g).strip()
+            if text:
+                segments.append(Segment(start, end, text))
     return segments
 
 
-def _make_segment(tokens: list[str], timestamps: list[float], offset: float) -> Segment | None:
+def _make_segment_ts(tokens: list[str], timestamps: list[float], offset: float) -> Segment | None:
+    """有时间戳路径:取句首/句尾 token 时间戳,加块偏移。"""
     text = "".join(tokens).strip()
     if not text:
         return None
@@ -110,8 +127,7 @@ def _make_segment(tokens: list[str], timestamps: list[float], offset: float) -> 
         if end < start:
             end = start
     else:
-        # 无时间戳:按 token 数在 30s 块内均匀分配
-        start, end = 0.0, _CHUNK_SECONDS
+        start, end = 0.0, 0.0
     return Segment(offset + start, offset + end, text)
 
 
@@ -235,7 +251,10 @@ class SenseVoiceTranscriber:
                 timestamps = list(getattr(result, "timestamps", None) or [])
                 if len(timestamps) != len(tokens):
                     timestamps = []
-                segments.extend(_tokens_to_segments(tokens, timestamps, offset))
+                # 传入本块实际时长(最后一块可能不足 30s),降级估算不超界
+                segments.extend(_tokens_to_segments(
+                    tokens, timestamps, offset, chunk_duration=len(chunk) / _WAV_SR,
+                ))
                 if progress is not None:
                     progress(min((offset + _CHUNK_SECONDS) / duration, 1.0))
                 self._emit(f"SenseVoice 转写进度:{i + 1}/{n_chunks} 块")

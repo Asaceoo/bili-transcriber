@@ -330,6 +330,8 @@ class Pipeline:
     def _get_transcriber(self):
         engine = self.settings.engine or "whisper"
         if engine == "qwen3-asr":
+            # 注意:vad 不进缓存 key —— qwen-asr 引擎不使用 VAD 参数
+            # (构造函数接收仅为接口对齐,转写流程不读它),改 VAD 无需重载模型。
             key = (engine, self.settings.model_size, self.settings.device,
                    self.settings.compute_type, self.settings.language,
                    self.settings.model_dir)
@@ -348,6 +350,7 @@ class Pipeline:
                     self._model_key = key
             return self._transcriber
         if engine == "sensevoice":
+            # 注意:vad 不进缓存 key —— SenseVoice 引擎不使用 VAD 参数(同 qwen3-asr)。
             key = (engine, self.settings.model_size, self.settings.language,
                    self.settings.model_dir)
             with self._model_lock:
@@ -397,6 +400,10 @@ class Pipeline:
                     logger.exception("空闲卸载检查失败")
                 continue
             if item is None:
+                # 哨兵也必须 task_done():否则 unfinished_tasks 永久 > 0,
+                # 空闲卸载(maybe_unload_model)与 apply_settings 的线程池重建
+                # 的 busy 判定会永久误判为"忙"。
+                self._queue.task_done()
                 break
             try:
                 if item.kind == "url":

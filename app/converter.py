@@ -37,21 +37,30 @@ def to_wav16k_mono(src: Path, dst: Path, ffmpeg: str = "ffmpeg") -> Path:
     errors: list[str] = []
     # 1) PyAV 优先:随包内置,不依赖外部 ffmpeg(修复 PATH 精简 ffmpeg 缺 wav muxer 导致转写失败)
     try:
-        _pyav_to_wav16k_mono(src, dst)
-        logger.info("转码完成(PyAV):%s → %s", src, dst)
-        return dst
-    except Exception as exc:  # noqa: BLE001 — 任何失败都回退 ffmpeg
-        errors.append(f"PyAV 转码失败:{exc}")
-        logger.warning("PyAV 转码失败(%s),回退 ffmpeg", exc)
-    # 2) 外部/随包 ffmpeg 回退(仅当可用且支持 wav muxer)
-    if _ffmpeg_capable(ffmpeg):
         try:
-            _ffmpeg_to_wav16k_mono(src, dst, ffmpeg)
-            logger.info("转码完成(ffmpeg):%s → %s", src, dst)
+            _pyav_to_wav16k_mono(src, dst)
+            logger.info("转码完成(PyAV):%s → %s", src, dst)
             return dst
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"ffmpeg 转码失败:{exc}")
-    raise ConverterError("; ".join(errors))
+        except Exception as exc:  # noqa: BLE001 — 任何失败都回退 ffmpeg
+            errors.append(f"PyAV 转码失败:{exc}")
+            logger.warning("PyAV 转码失败(%s),回退 ffmpeg", exc)
+        # 2) 外部/随包 ffmpeg 回退(仅当可用且支持 wav muxer)
+        if _ffmpeg_capable(ffmpeg):
+            try:
+                _ffmpeg_to_wav16k_mono(src, dst, ffmpeg)
+                logger.info("转码完成(ffmpeg):%s → %s", src, dst)
+                return dst
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"ffmpeg 转码失败:{exc}")
+        raise ConverterError("; ".join(errors))
+    except Exception:
+        # 失败时清理半截输出:否则残留的损坏 wav 会被下游"wav 已存在则复用"
+        # 的断点续跑逻辑当成有效缓存,把垃圾数据直接喂给转写器。
+        try:
+            dst.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("清理失败的转码输出失败(文件保留): %s | %s", dst, exc)
+        raise
 
 
 def _pyav_to_wav16k_mono(src: Path, dst: Path) -> None:

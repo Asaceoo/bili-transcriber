@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -104,12 +105,14 @@ def main() -> None:
             st, _ = _api("DELETE", f"{API}/releases/assets/{existing[name]}", tok)
             print(f"[asset] 删除旧资产 {name} (HTTP {st})")
         size = a.stat().st_size
-        st, body = _api(
-            "POST", f"{UPLOAD}/{release_id}/assets?name={name}", tok,
-            data=a.read_bytes(),
-            headers={"Content-Type": "application/octet-stream",
-                     "Content-Length": str(size)},
-        )
+        # 文件流式上传:GPU 包可达 2GB+,read_bytes() 会整份驻留内存,低配机易 OOM
+        with a.open("rb") as fh:
+            st, body = _api(
+                "POST", f"{UPLOAD}/{release_id}/assets?name={urllib.parse.quote(name)}", tok,
+                data=fh,
+                headers={"Content-Type": "application/octet-stream",
+                         "Content-Length": str(size)},
+            )
         ok = st in (201, 200)
         print(f"[asset] {'OK ' if ok else 'FAIL'} {name} ({size/1e6:.1f} MB, HTTP {st})")
         if not ok:

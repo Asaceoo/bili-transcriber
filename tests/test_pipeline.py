@@ -733,3 +733,35 @@ def test_store_roundtrips_workers(tmp_path):
     assert load_settings(p).workers == 2
     p.write_text("{}", encoding="utf-8")
     assert load_settings(p).workers == 2
+
+
+def test_shutdown_sentinels_keep_queue_counts_clean(env):
+    """回归:shutdown 哨兵消费后必须 task_done()。
+
+    否则 unfinished_tasks 永久 > 0:maybe_unload_model 的空闲判定与
+    apply_settings 的线程池重建 busy 判定全部永久误判为"忙"。
+    """
+    pipe, _store, settings, _events, _tmp = env
+    pipe.start()
+    pipe.shutdown()
+    for t in pipe._workers:
+        t.join(timeout=3)
+    assert pipe._queue.unfinished_tasks == 0
+    # 空闲卸载判定不再被残留计数卡死(idle_sec=0 → 应走到模型判定而非被计数挡住)
+    assert pipe.maybe_unload_model(idle_sec=0) is False  # 无模型可卸载
+
+
+def test_apply_settings_rebuilds_workers_when_idle(env):
+    """回归:空闲时改 workers 配置,线程池应立即重建为新并发数。
+
+    此前因哨兵未 task_done,unfinished_tasks 永久 > 0,busy 永真,
+    首次 shutdown 之后线程池重建永久失效。
+    """
+    pipe, _store, settings, _events, _tmp = env
+    settings.workers = 2
+    pipe.apply_settings(settings)
+    pipe.start()
+    assert len(pipe._workers) == 2
+    settings.workers = 1
+    pipe.apply_settings(settings)  # 空闲 → 立即重建
+    assert len([t for t in pipe._workers if t.is_alive()]) == 1

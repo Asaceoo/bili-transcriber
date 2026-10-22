@@ -54,7 +54,10 @@ def _photo_id(html: str, url: str) -> str:
     m = re.search(r"/(?:short-video|f|photo)/([a-zA-Z0-9_-]+)", url)
     if m:
         return m.group(1)
-    return "kuaishou_video"
+    # 不能用固定兜底 id:media_id 是历史库主键,两个不同视频拿到同一 id
+    # 会互相顶替(第二个被"已存在,跳过"错误跳过)。用 URL 哈希保证稳定且唯一。
+    import hashlib
+    return "ks_" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
 
 
 def _pick_mp4(html: str) -> str | None:

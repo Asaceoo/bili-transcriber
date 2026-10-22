@@ -86,13 +86,25 @@ def _extract_ffmpeg(
     frames_dir.mkdir(parents=True, exist_ok=True)
     scene_times = _ffmpeg_scene_times(video, exe, duration, progress)
     captures = _plan_captures(scene_times, min_gap, max_frames)
+    if duration > 0:
+        # 截取时刻钳制到视频时长内:最后一个切换点 +0.4s 稳定延迟可能越界,
+        # -ss 超过结尾会拿不到任何帧导致整次截帧失败。
+        captures = [min(t, max(duration - 0.05, 0.0)) for t in captures]
     results: list[KeyFrame] = []
     for i, t in enumerate(captures):
         img = frames_dir / f"slide_{i + 1:03d}.jpg"
-        _ffmpeg_grab(video, exe, t, img)
+        try:
+            _ffmpeg_grab(video, exe, t, img)
+        except KeyframeError as exc:
+            # 单帧失败(定位越界/瞬时解码错误)降级为跳过:不能让一帧失败
+            # 把已经成功的全部帧与讲义一起丢掉。
+            logger.warning("关键帧截取失败(跳过该帧): %.2fs | %s", t, exc)
+            continue
         results.append(KeyFrame(time=t, image=img))
         if progress is not None:
             progress(min(0.9 + 0.1 * (i + 1) / len(captures), 1.0))
+    if not results:
+        raise KeyframeError(f"全部关键帧截取失败: {video}")
     logger.info("关键帧提取完成(ffmpeg):%d 帧(阈值 %.2f / 最小间隔 %.1fs): %s",
                 len(results), FFMPEG_SCENE_THRESHOLD, min_gap, video)
     return results

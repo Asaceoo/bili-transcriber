@@ -114,3 +114,26 @@ def test_ffmpeg_capable_rejects_missing_wav(monkeypatch):
 
     monkeypatch.setattr(conv.subprocess, "run", _crippled)
     assert conv._ffmpeg_capable("ffmpeg") is False
+
+
+def test_to_wav16k_mono_failure_cleans_partial_output(monkeypatch, tmp_path):
+    """回归:转码全部失败时必须清理半截输出文件。
+
+    否则残留的损坏 wav 会被 pipeline"wav 已存在则复用"的断点续跑逻辑
+    当成有效缓存,把垃圾数据直接喂给转写器,表现为续跑必失败。
+    """
+    import pytest
+    from app import converter as conv
+    src = tmp_path / "src.mp4"
+    src.write_bytes(b"fake")
+    dst = tmp_path / "out.wav"
+
+    def _partial_then_fail(s, d):
+        d.write_bytes(b"RIFF....partial")  # 模拟 PyAV 中途失败留下的半截文件
+        raise RuntimeError("simulated encode failure")
+
+    monkeypatch.setattr(conv, "_pyav_to_wav16k_mono", _partial_then_fail)
+    monkeypatch.setattr(conv, "_ffmpeg_capable", lambda f="ffmpeg": False)
+    with pytest.raises(conv.ConverterError):
+        conv.to_wav16k_mono(src, dst)
+    assert not dst.exists(), "失败的转码输出应被清理,否则毒化断点续跑"

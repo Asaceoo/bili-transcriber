@@ -6,7 +6,7 @@ from app.sensevoice_transcriber import (
     SenseVoiceTranscriber,
     _map_sensevoice_language,
     _tokens_to_segments,
-    _make_segment,
+    _make_segment_ts,
     Segment,
 )
 
@@ -32,19 +32,12 @@ def test_map_language_unknown_falls_back_auto():
 
 
 def test_make_segment_with_timestamps():
-    seg = _make_segment(["你", "好", "。"], [1.0, 1.5, 2.0], offset=10.0)
+    seg = _make_segment_ts(["你", "好", "。"], [1.0, 1.5, 2.0], offset=10.0)
     assert seg == Segment(11.0, 12.0, "你好。")
 
 
-def test_make_segment_no_timestamps_uses_chunk_range():
-    seg = _make_segment(["你", "好"], [], offset=0.0)
-    assert seg.start == 0.0
-    assert seg.end > 0.0
-    assert seg.text == "你好"
-
-
 def test_make_segment_empty_text_returns_none():
-    assert _make_segment([" ", " "], [1.0, 2.0], 0.0) is None
+    assert _make_segment_ts([" ", " "], [1.0, 2.0], 0.0) is None
 
 
 def test_tokens_to_segments_splits_on_punctuation():
@@ -71,6 +64,22 @@ def test_tokens_to_segments_ts_mismatch_falls_back():
     segs = _tokens_to_segments(["a", "b", "c"], [0.1], offset=0.0)
     assert len(segs) == 1
     assert segs[0].text == "abc"
+
+
+def test_tokens_to_segments_no_ts_segments_disjoint_and_clipped():
+    """回归:无时间戳降级路径,句段时段必须互不重叠且不超出本块时长。
+
+    修复前所有句段都被赋 (0, 30) 同一区间(重叠),最后一块不足 30s 时
+    还会超出音频实际时长,SRT 时间戳错乱。
+    """
+    tokens = ["开", "饭", "时间", "。", "早上", "好", "！", "天气", "不错", "。"]
+    segs = _tokens_to_segments(tokens, [], offset=100.0, chunk_duration=10.0)
+    assert len(segs) == 3
+    for a, b in zip(segs, segs[1:]):
+        assert a.start < a.end <= b.start, f"时段重叠或乱序: {a} -> {b}"
+        assert a.start >= 100.0
+    for s in segs:
+        assert s.end <= 110.0, f"超出本块时长: {s}"
 
 
 def test_tokens_to_segments_empty():
