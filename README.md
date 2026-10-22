@@ -1,7 +1,6 @@
 # B站音频本地转写桌面工具 (bili-transcriber)
 <img width="3200" height="1929" alt="521118ebd34554bd" src="https://github.com/user-attachments/assets/6e8d0614-d772-4300-94d0-6ddf5020dfef" />
 
-[user-guide-zh-0.1.32.md](https://github.com/user-attachments/files/32939689/user-guide-zh-0.1.32.md)
 
 [user-guide-zh-0.1.38.md](https://github.com/user-attachments/files/33816196/user-guide-zh-0.1.38.md)
 # B站音频本地转写工具 — 用户手册（中文）
