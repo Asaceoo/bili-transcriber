@@ -36,3 +36,10 @@ store.db-shm
 store.db-wal
 # build/ 内下划线开头的临时脚本/媒体/旧构建(_old_builds 等)
 build/_*
+
+# 技能发布工作区(独立仓库 bili-note-skills 的克隆,不在本仓库管理)
+_publish_bili_skills/
+# 临时调试媒体与一次性脚本
+tmp_bili_p8/
+commit_msg_v*.txt
+docs/_*.py
