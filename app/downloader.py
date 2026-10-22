@@ -40,6 +40,9 @@ SUPPORTED_BROWSERS = ("chrome", "chromium", "edge", "firefox", "brave", "opera",
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
+# 分段并发下载的块大小(yt-dlp http_chunk_size):10MB/块,多连接并行拉取
+_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
+
 # 微信视频号相关域名
 _WECHAT_HOSTS = {"channels.weixin.qq.com"}
 
@@ -421,6 +424,9 @@ class Downloader:
             overwrites=True,
             progress_hooks=[hook],
             nopart=True,
+            # 分段并发下载:单连接下满带宽的场景(境外平台/限速源)提速明显,
+            # yt-dlp 内置多线程按块请求,无需外挂 aria2c
+            http_chunk_size=_HTTP_CHUNK_SIZE,
             # 网络健壮性:下载设超时与重试,避免僵死连接永久阻塞工作线程
             socket_timeout=30,
             retries=3,
@@ -477,6 +483,7 @@ class Downloader:
             overwrites=True,
             progress_hooks=[hook],
             nopart=True,
+            http_chunk_size=_HTTP_CHUNK_SIZE,  # 分段并发,与 download_audio 一致
             socket_timeout=30,
             retries=3,
             fragment_retries=3,

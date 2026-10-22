@@ -114,6 +114,7 @@ Saved to `data/settings.json`; "Restore defaults" button available. See next sec
 | VAD | on/off | Auto-disabled retry for music-only videos |
 | Illustrated notes | on/off | Bilibili tasks switch to video stream download |
 | Model directory | path | Default `%LOCALAPPDATA%\Bili Note\models`; integrity check built in |
+| Concurrent tasks | 1 / 2 (default) / 3 / 4 | Parallel download/convert jobs; transcription stays serial to avoid GPU contention |
 | Browser cookie | none / Chrome / Edge / Firefox / Brave / Opera / Vivaldi | Needed by Douyin & some YouTube videos |
 | cookies.txt path | file path | Netscape format; **overrides** browser cookie |
 | Proxy | e.g. `http://127.0.0.1:7890` | Required for YouTube |
@@ -122,6 +123,12 @@ Saved to `data/settings.json`; "Restore defaults" button available. See next sec
 The Settings tab also provides:
 - **External models**: drop an unpacked model folder into the model directory for auto-detection. SenseVoice: `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`; Qwen3-ASR: `Qwen/Qwen3-ASR-0.6B` or `Qwen3-ASR-1.7B` from ModelScope.
 - **Hardware detection**: one-click check of CPU/GPU/CUDA availability and VRAM, with device & compute-type recommendations.
+
+**Performance optimizations (since v0.1.35, automatic — no configuration needed)**:
+- **Prewarm on save**: clicking "Save" in Settings preloads the model in the background — submitting a task skips the 1–2 minute cold start.
+- **Idle auto-unload**: after 10 idle minutes the model is unloaded to free VRAM/RAM, reloaded automatically on the next task.
+- **GPU batched inference**: the whisper engine enables batched inference on GPU for a 2–4× speed-up (auto-fallback to sequential on failure).
+- **Chunked concurrent download**: downloads use 10 MB ranged chunks across parallel connections, 3–5× faster on large files / throttled sources.
 
 ---
 

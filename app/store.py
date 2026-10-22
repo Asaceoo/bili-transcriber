@@ -170,6 +170,7 @@ DEFAULT_SETTINGS = {
     "cookies_from_browser": "",   # 浏览器 Cookie(抖音/部分 YouTube 视频需要);空 = 不使用
     "cookie_file": "",            # cookies.txt 文件路径(Netscape 格式,优先于浏览器 Cookie)
     "proxy": "",                  # 网络代理(YouTube 等境外平台需要),如 http://127.0.0.1:7890 或 socks5://…
+    "workers": 2,                 # 下载/转码并发工作线程数(1~6,转写始终串行保护 GPU)
 }
 
 
@@ -188,6 +189,7 @@ class Settings:
     cookies_from_browser: str = DEFAULT_SETTINGS["cookies_from_browser"]
     cookie_file: str = DEFAULT_SETTINGS["cookie_file"]
     proxy: str = DEFAULT_SETTINGS["proxy"]
+    workers: int = DEFAULT_SETTINGS["workers"]
 
     def resolve_output_dir(self, base_dir: Path) -> Path:
         p = Path(self.output_dir)
@@ -208,6 +210,12 @@ def _coerce_setting(name: str, value):
         return bool(value)
     if ftype == "str":
         return str(value)
+    if ftype == "int":
+        # 整数字段(如 workers):坏值回退默认,不让损坏的 settings.json 崩掉加载
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return Settings.__dataclass_fields__[name].default
     return value
 
 

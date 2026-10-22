@@ -261,15 +261,26 @@ class _Result:
 
 
 class _FakeModel:
-    """按调用顺序返回预先给定结果的假模型,并记录收到的 language。"""
+    """按调用顺序返回预先给定结果的假模型,并记录收到的 language。
+
+    支持 qwen-asr 原生批量接口:audio 为列表时按序返回等量结果。
+    """
 
     def __init__(self, per_chunk):
         self.per_chunk = per_chunk
         self.calls = []  # 每次 transcribe 收到的 language
+        self._i = 0      # 已消费的结果游标
 
     def transcribe(self, audio, language=None, return_time_stamps=False):
         self.calls.append(language)
-        return [self.per_chunk[len(self.calls) - 1]]
+        n = len(audio) if isinstance(audio, list) else 1
+        res = self.per_chunk[self._i:self._i + n]
+        if len(res) < n:
+            raise AssertionError(f"假模型结果不足:需要 {n},剩 {len(res)}")
+        self._i += n
+        if isinstance(audio, list):
+            return res
+        return res[0]
 
 
 def _item(text, start, end):
@@ -312,8 +323,8 @@ def test_transcribe_chunks_offsets_and_progress(monkeypatch, tmp_path):
     assert segs[0].start == 0.0 and segs[0].end == 0.5
     # 第二块偏移 180s
     assert abs(segs[1].start - 180.0) < 1e-3 and abs(segs[1].end - 180.5) < 1e-3
-    # 语言映射 zh -> Chinese 传入模型
-    assert model.calls == ["Chinese", "Chinese"]
+    # 语言映射 zh -> Chinese 传入模型(两块合为一次批量调用,broadcast 同一语言)
+    assert model.calls == ["Chinese"]
     # 进度:起始 0.0 → 双块间 → 终值 1.0,单调不减
     assert progress_calls[0] == 0.0 and progress_calls[-1] == 1.0
     assert all(progress_calls[i] <= progress_calls[i + 1] for i in range(len(progress_calls) - 1))
@@ -496,3 +507,52 @@ def test_load_loads_model_once_under_concurrent_workers(tmp_path, monkeypatch):
     assert counter["n"] == 1, f"并发下模型被加载了 {counter['n']} 次,应为 1 次"
     t.load()
     assert counter["n"] == 1
+
+
+# ---------- P0 优化:批量推理回退 ----------
+
+class _ListHatingModel:
+    """list 输入(批量)必炸、tuple 输入(逐块)正常的假模型。"""
+
+    def __init__(self):
+        self.calls: list = []
+
+    def transcribe(self, audio, language=None, return_time_stamps=False):
+        self.calls.append(language)
+        if isinstance(audio, list):
+            raise RuntimeError("批量不支持")
+        return [_Result("回退文本。")]
+
+
+def test_batch_failure_falls_back_to_sequential(monkeypatch, tmp_path):
+    """批量调用异常时丢弃半成品、整体回退逐块推理,结果完整。"""
+    wav = tmp_path / "f.wav"
+    wav.write_bytes(b"")
+    t = QwenASRTranscriber(device="cpu")
+    model = _ListHatingModel()
+    _ready_transcriber(t, model, aligner_path=None)
+    monkeypatch.setattr(
+        "app.qwen_transcriber._split_chunks",
+        lambda data, sr, sec: [
+            (np.zeros(sr * 60, np.float32), 0.0),
+            (np.zeros(sr * 60, np.float32), 60.0),
+        ],
+    )
+    monkeypatch.setattr(
+        "app.qwen_transcriber.QwenASRTranscriber._read_wav_16k",
+        lambda self, w: (np.zeros(_WAV_SR * 120, np.float32), _WAV_SR),
+    )
+    segs = t.transcribe(wav, duration=120.0)
+    # 两块各自逐块转写成功,文本拼接后按句估算时间
+    assert [s.text for s in segs] == ["回退文本。", "回退文本。"]
+    assert len(model.calls) == 3  # 1 次批量尝试(失败) + 2 次逐块
+
+
+def test_unload_releases_qwen_model():
+    """unload() 清空模型引用,幂等。"""
+    t = QwenASRTranscriber(device="cpu")
+    t._model = _FakeModel([_Result("x。")])
+    t.unload()
+    assert t._model is None
+    t.unload()  # 幂等
+    assert t._model is None

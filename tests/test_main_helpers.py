@@ -71,7 +71,7 @@ def test_job_reveal_searches_actual_file_when_paths_stale(tmp_path, monkeypatch)
         audio_path=str(tmp_path / "old" / "BV1X_标题" / "标题.m4a"),
         md_path=str(tmp_path / "old" / "BV1X_标题" / "标题.md"),
     )
-    monkeypatch.setattr("app.main.settings", type("S", (), {
+    monkeypatch.setattr("app.ui.helpers.settings", type("S", (), {
         "resolve_output_dir": lambda self, base: tmp_path / "out",
     })())
     assert _job_reveal_path(job) == str(actual.resolve())
@@ -118,7 +118,7 @@ def test_open_path_with_list_arg_selects(tmp_path, monkeypatch):
     f = tmp_path / "a.md"
     f.write_text("x")
     calls = []
-    monkeypatch.setattr("app.main._launch_explorer", lambda t, select=False: calls.append((str(t), select)))
+    monkeypatch.setattr("app.ui.helpers._launch_explorer", lambda t, select=False: calls.append((str(t), select)))
     _open_path([str(f)])   # 模拟 $emit 到达服务器的 e.args=[path]
     assert calls == [(str(f), True)]
 
@@ -126,14 +126,14 @@ def test_open_path_with_list_arg_selects(tmp_path, monkeypatch):
 def test_open_path_missing_falls_back_to_parent_dir(tmp_path, monkeypatch):
     missing = tmp_path / "gone.md"
     calls = []
-    monkeypatch.setattr("app.main._launch_explorer", lambda t, select=False: calls.append((str(t), select)))
+    monkeypatch.setattr("app.ui.helpers._launch_explorer", lambda t, select=False: calls.append((str(t), select)))
     _open_path(str(missing))
     assert calls and calls[0][0] == str(tmp_path) and calls[0][1] is False
 
 
 def test_open_path_empty_does_not_crash(monkeypatch):
     calls = []
-    monkeypatch.setattr("app.main._launch_explorer", lambda t, select=False: calls.append((str(t), select)))
+    monkeypatch.setattr("app.ui.helpers._launch_explorer", lambda t, select=False: calls.append((str(t), select)))
     _open_path([""])   # md_path 为空(任务未完成)不应抛异常
     # 空路径:文件/目录都不存在 → 尝试兜底输出目录;不崩即可
     assert isinstance(calls, list)
@@ -147,7 +147,7 @@ def test_launch_explorer_uses_shell_api_first(tmp_path, monkeypatch):
     f = tmp_path / "普通文件.md"
     f.write_text("x")
     select_calls = []
-    monkeypatch.setattr("app.main._shell_select", lambda p: select_calls.append(p) or True)
+    monkeypatch.setattr("app.ui.helpers._shell_select", lambda p: select_calls.append(p) or True)
     popen_calls = []
     monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: popen_calls.append(cmd))
     _launch_explorer(f, select=True)
@@ -161,7 +161,7 @@ def test_launch_explorer_space_path_quoted(tmp_path, monkeypatch):
     f = tmp_path / "含 空格 文件.md"
     f.write_text("x")
     popen_calls = []
-    monkeypatch.setattr("app.main._shell_select", lambda p: False)
+    monkeypatch.setattr("app.ui.helpers._shell_select", lambda p: False)
     monkeypatch.setattr("subprocess.Popen", lambda cmd, **kw: popen_calls.append(cmd))
     _launch_explorer(f, select=True)
     assert len(popen_calls) == 1
@@ -183,7 +183,7 @@ def test_launch_explorer_quote_char_falls_back_to_parent(monkeypatch):
 
 def test_rerun_unwraps_list(monkeypatch):
     rerun_calls = []
-    monkeypatch.setattr("app.main.pipeline", type("P", (), {"rerun": lambda self, mid: rerun_calls.append(mid)})())
+    monkeypatch.setattr("app.ui.helpers.pipeline", type("P", (), {"rerun": lambda self, mid: rerun_calls.append(mid)})())
     _rerun(["BV12345"])
     assert rerun_calls == ["BV12345"]
 
@@ -203,3 +203,36 @@ def test_app_version_matches_pyproject():
         f"APP_VERSION={APP_VERSION} 与 pyproject version={m.group(1)} 不一致,"
         "请通过 scripts/release.py 的 bump 流程或手动同步 app/__init__.py"
     )
+
+
+def test_job_reveal_short_title_no_false_match(tmp_path, monkeypatch):
+    """回归:短标题(如 "t")不得子串误匹配输出目录里的无关文件。
+
+    旧实现用「标题 in 文件名」模糊匹配,本机输出目录里存在
+    Tableau2023(64bit).zip 时,标题 "t" 的任务会打开这个 zip。
+    新规则 = 精确 stem 或 BV 号前缀。
+    """
+    _mk(tmp_path / "out" / "Tableau2023(64bit).zip")
+    job = Job(
+        media_id="u9", bv="bv9", title="t", uploader="u",
+        duration=0.0, url="https://x", source_type="url",
+        audio_path="", md_path="", srt_path="", txt_path="",
+    )
+    monkeypatch.setattr("app.ui.helpers.settings", type("S", (), {
+        "resolve_output_dir": lambda self, base: tmp_path / "out",
+    })())
+    assert _job_reveal_path(job) == ""
+
+
+def test_job_reveal_bv_prefix_match(tmp_path, monkeypatch):
+    """BV 号前缀仍可命中产物(BV1X_标题.md 的场景)。"""
+    actual = _mk(tmp_path / "out" / "BV1P_标题" / "BV1P_标题.md")
+    job = Job(
+        media_id="BV1P", bv="BV1P", title="完全不相同的标题", uploader="u",
+        duration=0.0, url="https://x", source_type="url", status="done",
+        audio_path="", md_path=str(tmp_path / "gone" / "x.md"), srt_path="", txt_path="",
+    )
+    monkeypatch.setattr("app.ui.helpers.settings", type("S", (), {
+        "resolve_output_dir": lambda self, base: tmp_path / "out",
+    })())
+    assert _job_reveal_path(job) == str(actual.resolve())

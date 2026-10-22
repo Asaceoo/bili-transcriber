@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 UpdateCallback = Callable[[Job], None]  # 类型别名:任务更新回调(job) -> None
 
+# 模型空闲卸载阈值(秒):队列空且超过该时长无任务时,卸载模型释放显存/内存。
+# 下次任务提交会自动重新加载(懒加载机制),仅损失一次冷启动时间。
+MODEL_IDLE_UNLOAD_SEC = 600
+
 
 @dataclass
 class Task:
@@ -63,6 +67,9 @@ class Pipeline:
         self._paused_prev: dict[str, str] = {}  # 暂停前阶段,恢复时还原
         self._last_activity: dict[str, float] = {}  # 各任务最近一次进度更新时间(卡顿检测)
         self._recovered_paused = False
+        self._last_task_done = time.monotonic()  # 最近一次任务完成时刻(空闲卸载计时)
+        self._prewarm_thread: threading.Thread | None = None
+        self._num_workers = max(1, min(6, self.WORKERS))  # 实际并发数(apply_settings 可覆盖)
         # 启动即同步设置(含 Cookie 配置:抖音/部分 YouTube 视频必需)
         self.apply_settings(settings)
 
@@ -87,7 +94,7 @@ class Pipeline:
         self._workers = [
             threading.Thread(target=self._run, name=f"pipeline-worker-{i}",
                              daemon=True)
-            for i in range(self.WORKERS)
+            for i in range(self._num_workers)
         ]
         for t in self._workers:
             t.start()
@@ -158,6 +165,93 @@ class Pipeline:
                 cookie_file=getattr(settings, "cookie_file", ""),
                 proxy=getattr(settings, "proxy", ""),
             )
+        # 并发数设置(1~6,越界/非法回退 2)
+        try:
+            workers = int(getattr(settings, "workers", self.WORKERS))
+        except (TypeError, ValueError):
+            workers = self.WORKERS
+        self._num_workers = max(1, min(6, workers))
+        # 工作线程已启动且数量配置变化、且当前空闲时:重建线程池让新并发数即时生效。
+        # busy 判定含 paused:暂停中的 worker 可能阻塞在 wait_if_paused,
+        # shutdown 的 join(2s) 等不到它退出,新旧线程池会并存导致并发超限。
+        busy = (self._queue.unfinished_tasks > 0
+                or self.store.count_jobs("queued") > 0
+                or self.store.count_jobs("paused") > 0)
+        if (self._workers
+                and any(t.is_alive() for t in self._workers)
+                and self._num_workers != len(self._workers)
+                and not busy):
+            self.shutdown()
+            for t in self._workers:
+                t.join(timeout=2.0)
+            self.start()
+
+    # ---------- 模型预热与空闲卸载 ----------
+
+    def prewarm(self) -> None:
+        """后台预热模型(设置页保存引擎/模型后调用):提交任务时免 1~2 分钟冷启动。
+
+        幂等:预热线程已在跑 / 队列忙(任务很快会自己加载)时不重复触发。
+        """
+        th = self._prewarm_thread
+        if th is not None and th.is_alive():
+            return
+        if self._queue.unfinished_tasks > 0 or self.store.count_jobs("queued") > 0:
+            return
+        with self._model_lock:
+            cur = self._transcriber
+            if cur is not None and getattr(cur, "loaded", False):
+                return  # 已加载,无需预热
+
+        def _prewarm() -> None:
+            try:
+                t = self._get_transcriber()
+                t.load()
+                # 加载期间用户可能再次改引擎/模型(_get_transcriber 会替换实例):
+                # 校验仍是当前实例,已过时则立即卸载,避免旧模型白占显存/内存
+                with self._model_lock:
+                    stale = self._transcriber is not t
+                if stale:
+                    unload = getattr(t, "unload", None)
+                    if callable(unload):
+                        try:
+                            unload()
+                        except Exception:  # noqa: BLE001 — 释放失败仅记日志
+                            logger.exception("预热的过时模型卸载失败")
+                    return
+                self._last_task_done = time.monotonic()  # 预热计入空闲计时
+                self._emit("模型预热完成,提交任务即可直接转写")
+            except Exception as exc:  # noqa: BLE001 — 预热失败不影响后续任务正常加载
+                logger.warning("模型预热失败(提交任务时会重新加载): %s", exc)
+
+        self._prewarm_thread = threading.Thread(target=_prewarm, name="model-prewarm",
+                                                daemon=True)
+        self._prewarm_thread.start()
+
+    def maybe_unload_model(self, idle_sec: float = MODEL_IDLE_UNLOAD_SEC) -> bool:
+        """队列空闲超过 idle_sec 时卸载模型,释放显存/内存。返回是否发生了卸载。
+
+        线程安全:_model_lock 保护替换;in-flight 转写持有 transcriber 自身引用,
+        卸载只清 pipeline 引用,不会打断进行中的任务。
+        """
+        if self._queue.unfinished_tasks > 0 or self.store.count_jobs("queued") > 0:
+            return False
+        with self._model_lock:
+            t = self._transcriber
+            if t is None or not getattr(t, "loaded", False):
+                return False
+            if time.monotonic() - self._last_task_done < idle_sec:
+                return False
+            self._transcriber = None
+            self._model_key = None
+        unload = getattr(t, "unload", None)
+        if callable(unload):
+            try:
+                unload()
+            except Exception:  # noqa: BLE001 — 卸载失败仅记日志
+                logger.exception("模型卸载失败")
+        self._emit(f"模型空闲超过 {int(idle_sec // 60)} 分钟,已自动卸载(下次任务将重新加载)")
+        return True
 
     # ---------- 任务控制(暂停/恢复/取消) ----------
 
@@ -296,6 +390,11 @@ class Pipeline:
             try:
                 item = self._queue.get(timeout=0.5)
             except queue.Empty:
+                # 空闲检查:长时间无任务时卸载模型释放显存/内存(幂等,多 worker 竞争安全)
+                try:
+                    self.maybe_unload_model()
+                except Exception:  # noqa: BLE001 — 空闲卸载不影响 worker 存活
+                    logger.exception("空闲卸载检查失败")
                 continue
             if item is None:
                 break
@@ -309,6 +408,7 @@ class Pipeline:
                 self._emit(f"处理任务失败:{item}")
             finally:
                 self._queue.task_done()
+                self._last_task_done = time.monotonic()
 
     def _process_url(self, url: str, media_id: str = "") -> None:
         self._emit(f"正在解析链接:{url}")

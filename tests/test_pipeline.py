@@ -22,6 +22,20 @@ class FakeDownloader:
         self.audio_ext = ".m4a"   # 模拟下载产物扩展名(.m4a=纯音频,.mp4=含画面)
         self.video_calls = 0
 
+    @staticmethod
+    def _write(path, data):
+        """带重试写入:Windows AV 扫描会让"删除后立刻重建的同名文件"短暂
+        PermissionError(实测偶发),重试至锁释放,消除测试随机失败。"""
+        import time as _t
+        for attempt in range(10):
+            try:
+                path.write_bytes(data)
+                return
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                _t.sleep(0.2)
+
     def probe(self, url):
         self.probe_calls += 1
         return [INFO]
@@ -29,7 +43,7 @@ class FakeDownloader:
     def download_audio(self, info, dest_dir, progress=None, want_video=False):
         dest_dir.mkdir(parents=True, exist_ok=True)
         p = dest_dir / f"管道测试{self.audio_ext}"
-        p.write_bytes(b"fake")
+        self._write(p, b"fake")
         info.audio_path = p
         if progress:
             progress(0.5)
@@ -40,7 +54,7 @@ class FakeDownloader:
         self.video_calls += 1
         dest_dir.mkdir(parents=True, exist_ok=True)
         p = dest_dir / "管道测试.video.mp4"
-        p.write_bytes(b"fake-video")
+        self._write(p, b"fake-video")
         if progress:
             progress(1.0)
         return p
@@ -587,3 +601,135 @@ def test_start_recovers_paused_jobs_from_previous_session(env, monkeypatch):
     item = pipe._queue.get_nowait()
     assert item.kind == "url" and item.media_id == "BVold"
     pipe.shutdown()
+
+
+# ---------- P0/P1 优化:空闲卸载 / 预热 / 并发数可配置 ----------
+
+class _UnloadableFake(FakeTranscriber):
+    """带 loaded/unload 的假转写引擎,对齐真实引擎接口。"""
+
+    def __init__(self):
+        super().__init__()
+        self.unload_calls = 0
+        self._loaded = True
+
+    @property
+    def loaded(self):
+        return self._loaded
+
+    def unload(self):
+        self.unload_calls += 1
+        self._loaded = False
+
+
+def test_maybe_unload_model_after_idle(env):
+    """空闲超时:队列空 + loaded + 超过阈值 → 卸载并清 pipeline 引用。"""
+    import time as _time
+    pipe, store, _, events, _ = env
+    fake = _UnloadableFake()
+    pipe._transcriber = fake
+    pipe._model_key = ("locked",)
+    pipe._get_transcriber = lambda: fake
+    pipe._last_task_done = _time.monotonic() - 3600  # 1 小时前
+
+    assert pipe.maybe_unload_model(idle_sec=600) is True
+    assert fake.unload_calls == 1
+    assert pipe._transcriber is None and pipe._model_key is None
+    assert any("卸载" in e for e in events)
+
+
+def test_no_unload_when_busy_or_fresh(env):
+    """有排队任务 / 空闲未超时 → 不卸载。"""
+    import time as _time
+    pipe, store, _, _, _ = env
+    fake = _UnloadableFake()
+    pipe._transcriber = fake
+    pipe._get_transcriber = lambda: fake
+
+    # 空闲未超时
+    pipe._last_task_done = _time.monotonic()
+    assert pipe.maybe_unload_model(idle_sec=600) is False
+    assert fake.unload_calls == 0
+
+    # 有 queued 任务
+    pipe._last_task_done = _time.monotonic() - 3600
+    job = Job(media_id="BV1busy", bv="BV1busy", title="t", uploader="u",
+              duration=1.0, url="https://x")
+    store.upsert_job(job)
+    job.status = "queued"
+    store.upsert_job(job)
+    assert pipe.maybe_unload_model(idle_sec=600) is False
+    assert fake.unload_calls == 0
+
+
+def test_prewarm_loads_model_and_is_idempotent(env, monkeypatch):
+    """预热:后台线程加载模型;已加载时跳过;忙时不触发。"""
+    pipe, store, settings, events, _ = env
+
+    loads: list[int] = []
+
+    class _PrewarmFake(_UnloadableFake):
+        def load(self):
+            loads.append(1)
+
+    _prewarm_fake = _PrewarmFake()
+
+    def _get():
+        # 对齐真实 _get_transcriber 契约:装填 _transcriber/_model_key 后返回,
+        # 预热完成后的 stale 校验(pipeline 侧防泄漏)才不会误判为过时实例
+        pipe._transcriber = _prewarm_fake
+        pipe._model_key = ("locked",)
+        return _prewarm_fake
+
+    pipe._get_transcriber = _get
+    pipe.prewarm()
+    th = pipe._prewarm_thread
+    if th is not None:
+        th.join(timeout=5)
+    assert loads == [1]
+
+    # 已加载(经 _get 装填)→ 再次预热跳过
+    pipe.prewarm()
+    assert loads == [1]
+
+    # 队列忙 → 不预热
+    pipe._transcriber = None
+    pipe._model_key = None
+    job = Job(media_id="BV1warm", bv="BV1warm", title="t", uploader="u",
+              duration=1.0, url="https://x", status="queued")
+    store.upsert_job(job)
+    pipe.prewarm()
+    assert loads == [1]  # 忙时不新增
+
+
+def test_workers_from_settings(env):
+    """workers 设置生效:1 → 单 worker;非法值回退 2。"""
+    pipe, _, settings, _, _ = env
+
+    settings.workers = 1
+    pipe.apply_settings(settings)
+    assert pipe._num_workers == 1
+
+    settings.workers = 99  # 越界夹紧到 6
+    pipe.apply_settings(settings)
+    assert pipe._num_workers == 6
+
+    settings.workers = "abc"  # 非法回退 2
+    pipe.apply_settings(settings)
+    assert pipe._num_workers == 2
+
+
+def test_store_roundtrips_workers(tmp_path):
+    """workers 字段持久化与坏值兜底。"""
+    import json as _json
+    from app.store import load_settings, save_settings
+    p = tmp_path / "settings.json"
+    s = Settings(output_dir="out", workers=3)
+    save_settings(s, p)
+    assert load_settings(p).workers == 3
+    p.write_text(_json.dumps({"workers": "4"}), encoding="utf-8")
+    assert load_settings(p).workers == 4
+    p.write_text(_json.dumps({"workers": "oops"}), encoding="utf-8")
+    assert load_settings(p).workers == 2
+    p.write_text("{}", encoding="utf-8")
+    assert load_settings(p).workers == 2

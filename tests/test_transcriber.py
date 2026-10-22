@@ -215,3 +215,85 @@ def test_load_loads_model_once_under_concurrent_workers(fake_faster_whisper, tmp
     # 已加载后再次 load 不应重复创建
     t.load()
     assert len(FakeWhisperModel.instances) == 1
+
+
+# ---------- P0 优化:GPU 批量推理与空闲卸载 ----------
+
+class _FakeBatched:
+    """可编程的假 BatchedInferencePipeline。"""
+
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    def transcribe(self, audio, vad_filter=True, beam_size=5, language=None, batch_size=8):
+        self.calls.append({"vad": vad_filter, "language": language, "batch": batch_size})
+        if self.fail:
+            raise RuntimeError("批量推理崩了")
+
+        class _Info:
+            duration = 2.0
+
+        class _Seg:
+            def __init__(self, s, e, t):
+                self.start, self.end, self.text = s, e, t
+
+        return iter([_Seg(0.0, 1.0, "批量"), _Seg(1.0, 2.0, "推理")]), _Info()
+
+
+class _FakeSeqModel:
+    """逐段推理用的假 WhisperModel(可成功返回)。"""
+
+    def __init__(self):
+        self.calls = 0
+
+    def transcribe(self, *a, **k):
+        self.calls += 1
+
+        class _Info:
+            duration = 2.0
+
+        class _Seg:
+            def __init__(self, s, e, t):
+                self.start, self.end, self.text = s, e, t
+
+        return iter([_Seg(0.0, 1.0, "逐段")]), _Info()
+
+
+def _wav(tmp_path: Path) -> Path:
+    p = tmp_path / "a.wav"
+    p.write_bytes(b"")
+    return p
+
+
+def test_batched_pipeline_used_on_gpu(tmp_path):
+    """注入 _batched 时 transcribe 走批量推理路径。"""
+    t = Transcriber(model_size="tiny")
+    t._model = _FakeSeqModel()
+    t._batched = _FakeBatched()
+    segs = t.transcribe(_wav(tmp_path), duration=2.0)
+    assert [s.text for s in segs] == ["批量", "推理"]
+    assert t._batched.calls[0]["batch"] == 8
+    assert t._model.calls == 0  # 未走逐段
+
+
+def test_batched_failure_falls_back_to_sequential(tmp_path):
+    """批量推理异常时自动回退逐段推理,结果不受影响。"""
+    t = Transcriber(model_size="tiny")
+    t._model = _FakeSeqModel()
+    t._batched = _FakeBatched(fail=True)
+    segs = t.transcribe(_wav(tmp_path), duration=2.0)
+    assert [s.text for s in segs] == ["逐段"]
+    assert t._model.calls == 1
+
+
+def test_unload_releases_model_and_batched():
+    """unload() 清空模型与批量管线;空载卸载是幂等 no-op。"""
+    t = Transcriber(model_size="tiny")
+    t._model = _FakeSeqModel()
+    t._batched = _FakeBatched()
+    assert t.loaded
+    t.unload()
+    assert not t.loaded and t._model is None and t._batched is None
+    t.unload()  # 幂等
+    assert not t.loaded

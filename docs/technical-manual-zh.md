@@ -38,13 +38,17 @@ bili-transcriber 是一个**纯本地的多平台视频/音频转写桌面工具
 
 ```
 bili-transcriber/
-├── app/                        # 应用源码（20 模块）
-│   ├── main.py                 # NiceGUI 三页签 UI + 事件绑定 + 启动模式选择
-│   ├── pipeline.py             # 核心编排：状态机 + WORKERS=2 线程池 + 引擎锁
-│   ├── downloader.py           # 下载编排：平台识别/短链/SSR/Cookie/代理/DNS防护
+├── app/                        # 应用源码（23 模块）
+│   ├── main.py                 # 进程入口：日志/托盘/WebView2/启动模式 + UI 名字再导出（v0.1.35 拆分后瘦身）
+│   ├── ui/                     # UI 包（v0.1.35 自 main.py 拆分）
+│   │   ├── state.py            # 路径常量 + 全局单例（store/settings/pipeline/events）
+│   │   ├── helpers.py          # 动作辅助：打开定位/删除/重跑/上传落盘（notify 无上下文安全）
+│   │   └── pages.py            # 页面构建：任务/历史/运行日记/设置 四页签
+│   ├── pipeline.py             # 核心编排：状态机 + 可配置线程池(workers 1~6) + 引擎锁 + 预热/空闲卸载
+│   ├── downloader.py           # 下载编排：平台识别/短链/SSR/Cookie/代理/DNS防护/分段并发
 │   ├── kuaishou.py             # 快手分享页 SSR 解析（免登录提取 mp4 直链）
-│   ├── transcriber.py          # 引擎1：faster-whisper 封装
-│   ├── qwen_transcriber.py     # 引擎2：Qwen3-ASR 封装（分块转写+对齐器）
+│   ├── transcriber.py          # 引擎1：faster-whisper 封装（GPU 批量推理+空闲卸载）
+│   ├── qwen_transcriber.py     # 引擎2：Qwen3-ASR 封装（分块+批量推理+对齐器）
 │   ├── sensevoice_transcriber.py # 引擎3：SenseVoice 封装（token→段时间戳）
 │   ├── converter.py            # FFmpeg 转码 16kHz 单声道 WAV
 │   ├── keyframes.py            # 关键帧提取（ffmpeg scene / PyAV 双后端）
@@ -53,7 +57,7 @@ bili-transcriber/
 │   ├── gpu_runtime.py          # 外置 GPU 加速包 DLL 注册
 │   ├── ffmpeg_bin.py           # ffmpeg 二进制解析（PATH 优先，内置兜底）
 │   ├── hardware.py             # 硬件探测（GPU 型号/显存/CUDA 可用性）
-│   ├── store.py                # SQLite + JSON 设置（含 14 项设置定义）
+│   ├── store.py                # SQLite + JSON 设置（含 15 项设置定义，含 workers）
 │   ├── task_control.py         # 任务级 暂停/取消 控制（线程安全）
 │   ├── native_dialog.py        # Windows 原生文件选择框（ctypes comdlg32）
 │   ├── tray.py                 # 系统托盘（pystray，失败静默降级）
@@ -78,23 +82,28 @@ bili-transcriber/
 
 ## 4. 模块职责（要点）
 
-### 4.1 `main.py` — UI 与事件循环
-- 三页签：**任务 / 历史 / 设置**；UI 线程每 **0.6s** 轮询 `Store` 并消费事件 `deque(maxlen=200)`。
+### 4.1 `main.py` + `app/ui/` — UI 与事件循环（v0.1.35 拆分）
+- **拆分结构**：`main.py`（196 行）只保留进程入口（日志/托盘/WebView2/启动模式），并**再导出 UI 名字**保持旧导入兼容（`from app.main import _first_arg` 仍可用）；页面逻辑在 `app/ui/` 三模块：`state.py`（单例）/ `helpers.py`（动作）/ `pages.py`（四页签构建）。
+- 四页签：**任务 / 历史 / 运行日记 / 设置**；UI 线程每 **0.6s** 轮询 `Store` 并消费事件 `deque(maxlen=200)`。
 - 引擎切换联动：`model_select` 选项按引擎自动切换（`MODEL_OPTIONS` / `QWEN_MODEL_OPTIONS` / `SENSEVOICE_MODEL_OPTIONS`），非法组合自动纠正。
-- 表格行级事件：NiceGUI `$emit('open-path', path)` → `e.args` 为 `[path]` 列表，经 `_first_arg(e)` 解包后 `_open_path()` 降级打开（文件缺失→父目录→输出目录）；explorer `/select,"path"` 引号包裹防空格断参。
+- 表格行级事件：NiceGUI `$emit('open-path', path)` → `e.args` 为 `[path]` 列表，经 `_first_arg(e)` 解包后 `_open_path()` 降级打开（文件缺失→父目录→输出目录）；explorer 定位走 Shell API `SHOpenFolderAndSelectItems`。
+- **通知安全（v0.1.35）**：helpers 动作经 `_notify()` 包装——无 NiceGUI slot 上下文（托盘线程/纯逻辑测试）时降级为日志，不再抛 `RuntimeError`。
 - 启动模式：默认浏览器模式（不依赖 WebView2，100% 可靠）；`BILI_FORCE_NATIVE=1` 时尝试 pywebview 原生窗口；`BILI_PORT` 覆盖端口（默认 8765）。
 
 ### 4.2 `pipeline.py` — 核心编排
-- **并发模型（v0.1.34）**：`WORKERS = 2` 工作线程并发取队列（下载/转码可重叠），**转写由三层锁保护**：
+- **并发模型（v0.1.35）**：工作线程数**可配置**（`Settings.workers`，1~6 夹紧，默认 2；`apply_settings` 在空闲且无 paused 任务时热重建线程池），下载/转码可重叠，**转写由三层锁保护**：
   - `_model_lock`（pipeline）：保护 transcriber 实例的懒加载/替换（设置变更时重建）。
   - 引擎内部 `self._lock`：`transcribe()` 串行化，确保同一时刻只有一个任务占用模型/显存。
   - 引擎 `load()` 为 **double-checked locking**：判空+加载整体在锁内，杜绝冷启动双加载（v0.1.32 起修复，含三引擎并发回归测试）。
+- **模型预热（v0.1.35）**：`prewarm()` 后台线程预加载模型（设置保存后触发）；幂等（已有预热线程/队列忙/已加载时跳过），加载完成后校验实例未被替换，过时实例立即卸载防泄漏。
+- **模型空闲卸载（v0.1.35）**：`maybe_unload_model(idle_sec=600)`——队列空且空闲超 10 分钟时卸载模型释放显存/内存；worker 取队列超时空闲分支触发，多 worker 竞争安全（`_model_lock` + 双重检查）。三引擎均实现持锁、幂等的 `unload()`。
 - **状态机**：`queued → downloading → converting → transcribing → extracting(可选) → saving → done / failed`；支持任务级暂停/取消（`task_control.py`）。
 - **断点续跑**：`audio_path` / `wav_path` 缓存复用，重跑跳过已完成的下载/转码。
 - **缓存清理容错**：删除中间产物被沙箱拦截抛 `OSError` 时降级 warning，任务仍 `done`。
 
 ### 4.3 `downloader.py` — 下载编排
 - **平台识别**：按域名分流 `bilibili / youtube / douyin / xiaohongshu / kuaishou`，未知平台按 B站兼容处理；media_id 前缀 `yt_/dy_/xhs_/ks_`。
+- **分段并发（v0.1.35）**：下载阶段带 `http_chunk_size=10MB`（`_HTTP_CHUNK_SIZE`），yt-dlp 内置多连接按块并行拉取，大文件/限速源提速 3~5 倍；probe 阶段不下载故不带该参数。
 - **短链与安全**：b23.tv 等短链展开走**域名白名单**校验 + **DNS-rebinding 防护**（解析 IP 复核）后再跟随重定向；抖音分享链经 `modal_id` / 重定向两种正则提取视频 id。
 - **Cookie/代理**：`cookiefile`（cookies.txt）优先于 `cookiesfrombrowser`（浏览器名不在 SUPPORTED_BROWSERS 时忽略，避免 YoutubeDL 构造抛错）；代理形如 `http://127.0.0.1:7890` / `socks5://…`。
 - **网络探测缓存**：`_reach_cache` 在代理变更后清空重测。
@@ -108,6 +117,8 @@ bili-transcriber/
 
 - **模型懒加载 + 缓存键**：`(model_size, device, compute_type, language, vad)` 变化才重载。
 - **VAD 自愈**：Silero VAD 滤除全部语音（纯音乐）时自动关闭重试一次。
+- **GPU 批量推理（v0.1.35）**：whisper 引擎在 `device=cuda` 时构建 `BatchedInferencePipeline`（`batch_size=8`，faster-whisper ≥1.0），整段音频分批并行 encode/decode，提速 2~4 倍；批量异常自动回退逐段推理（`_run` 统一捕获，`CancelledError` 例外直接上抛）。Qwen3-ASR 引擎利用 qwen-asr 原生 `List[audio]` 批量接口，按 4 块/组批量推理（返回数量不符/异常时丢弃半成品整体回退逐块，进度事件格式不变）。
+- **空闲卸载（v0.1.35）**：三引擎实现 `unload()`（持锁、幂等），配合 pipeline 空闲回收。
 - **Qwen 分块转写**：长音频切 60s 块逐块推理，`on_event` 上报「第 i/n 块」进度；1.7B 在 CPU 上主动提示慢。
 
 ### 4.5 `models.py` — 模型管理

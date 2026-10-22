@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], None]  # 0.0 ~ 1.0
 
+# GPU 批量推理的批大小:8 在 6~12GB 显存上平衡吞吐与峰值显存
+_BATCH_SIZE = 8
+
 
 @dataclass
 class Segment:
@@ -40,11 +43,24 @@ class Transcriber:
         self.vad = vad
         self.model_dir = model_dir or ""
         self._model = None
+        self._batched = None  # GPU 时的批量推理管线(faster-whisper >=1.0)
         self._lock = threading.Lock()
 
     @property
     def loaded(self) -> bool:
         return self._model is not None
+
+    def unload(self) -> None:
+        """卸载模型释放显存/内存(空闲回收用)。
+
+        持锁卸载:若恰有转写进行中,会等该次转写完成后再释放(安全)。
+        """
+        with self._lock:
+            if self._model is None:
+                return
+            self._model = None
+            self._batched = None
+        logger.info("Whisper 模型已卸载,释放内存/显存")
 
     @property
     def resolved_device(self) -> str:
@@ -86,6 +102,16 @@ class Transcriber:
             except Exception:
                 logger.exception("模型加载失败: %s (device=%s, compute=%s)", model_ref, device, compute)
                 raise
+            if device == "cuda":
+                # GPU 上启用批量推理(整段音频分批并行 encode/decode,提速 2~4 倍);
+                # 构建失败不影响可用性,_run 会自动回退逐段推理
+                try:
+                    from faster_whisper import BatchedInferencePipeline
+                    self._batched = BatchedInferencePipeline(model=self._model)
+                    logger.info("已启用批量推理(batch_size=%d)", _BATCH_SIZE)
+                except Exception:  # noqa: BLE001 — 批量管线构建失败仅回退,不致命
+                    logger.exception("BatchedInferencePipeline 构建失败,回退逐段推理")
+                    self._batched = None
             logger.info("模型加载完成:%s", model_ref)
 
     def _resolve(self) -> tuple[str, str]:
@@ -146,27 +172,65 @@ class Transcriber:
              vad: bool) -> list[Segment]:
         segments: list[Segment] = []
         with self._lock:
-            logger.info("开始转写 %s (vad=%s, language=%s)", wav, vad, self.language)
-            try:
-                it, info = self._model.transcribe(
-                    str(wav), vad_filter=vad, beam_size=5, language=self.language,
-                )
-                if progress is not None and duration <= 0:
-                    duration = float(getattr(info, "duration", 0.0) or 0.0)
-                for seg in it:
-                    text = seg.text.strip()
-                    if text:
-                        segments.append(Segment(float(seg.start), float(seg.end), text))
-                    if progress is not None and duration > 0:
-                        progress(min(segments[-1].end / duration, 1.0) if segments else 0.0)
-            except CancelledError:
-                # 用户取消任务:不当作转写失败记录,直接向上传播
-                raise
-            except Exception:
-                logger.exception("转写失败:%s", wav)
-                raise
-            if progress is not None:
-                progress(1.0)
+            if self._batched is not None:
+                try:
+                    return self._run_batched(wav, duration, progress, vad)
+                except CancelledError:
+                    raise  # 用户取消不作回退,直接上抛
+                except Exception:
+                    logger.exception("批量推理失败,回退逐段推理:%s", wav)
+            return self._run_sequential(wav, duration, progress, vad)
+
+    def _run_batched(self, wav: Path, duration: float, progress: ProgressCallback | None,
+                     vad: bool) -> list[Segment]:
+        """GPU 批量推理:整段音频按 batch_size 分批并行,吞吐远高于逐段。
+
+        异常由 _run 统一捕获并回退 _run_sequential,此处不做兜底。
+        """
+        segments: list[Segment] = []
+        logger.info("开始批量转写 %s (vad=%s, batch=%d)", wav, vad, _BATCH_SIZE)
+        it, info = self._batched.transcribe(
+            str(wav), vad_filter=vad, beam_size=5, language=self.language,
+            batch_size=_BATCH_SIZE,
+        )
+        if progress is not None and duration <= 0:
+            duration = float(getattr(info, "duration", 0.0) or 0.0)
+        for seg in it:
+            text = seg.text.strip()
+            if text:
+                segments.append(Segment(float(seg.start), float(seg.end), text))
+            if progress is not None and duration > 0:
+                progress(min(segments[-1].end / duration, 1.0) if segments else 0.0)
+        if progress is not None:
+            progress(1.0)
+        logger.info("批量转写完成:%s → %d 段", wav, len(segments))
+        return segments
+
+    def _run_sequential(self, wav: Path, duration: float, progress: ProgressCallback | None,
+                        vad: bool) -> list[Segment]:
+        """逐段推理(CPU 或批量推理失败时的回退路径)。"""
+        segments: list[Segment] = []
+        logger.info("开始转写 %s (vad=%s, language=%s)", wav, vad, self.language)
+        try:
+            it, info = self._model.transcribe(
+                str(wav), vad_filter=vad, beam_size=5, language=self.language,
+            )
+            if progress is not None and duration <= 0:
+                duration = float(getattr(info, "duration", 0.0) or 0.0)
+            for seg in it:
+                text = seg.text.strip()
+                if text:
+                    segments.append(Segment(float(seg.start), float(seg.end), text))
+                if progress is not None and duration > 0:
+                    progress(min(segments[-1].end / duration, 1.0) if segments else 0.0)
+        except CancelledError:
+            # 用户取消任务:不当作转写失败记录,直接向上传播
+            raise
+        except Exception:
+            logger.exception("转写失败:%s", wav)
+            raise
+        if progress is not None:
+            progress(1.0)
         logger.info("转写完成:%s → %d 段", wav, len(segments))
         return segments
 

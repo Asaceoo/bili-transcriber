@@ -78,23 +78,28 @@ bili-transcriber/
 
 ## 4. Module Responsibilities (highlights)
 
-### 4.1 `main.py` — UI & Event Loop
-- Three tabs: **Tasks / History / Settings**; UI thread polls `Store` every **0.6s** and drains the event `deque(maxlen=200)`.
+### 4.1 `main.py` + `app/ui/` — UI & Event Loop (split since v0.1.35)
+- **Split layout**: `main.py` (~200 lines) keeps only the process entry (logging/tray/WebView2/launch mode) and **re-exports UI names** for backward compatibility (`from app.main import _first_arg` still works); page logic lives in three `app/ui/` modules: `state.py` (singletons) / `helpers.py` (actions) / `pages.py` (four-tab builder).
+- Four tabs: **Tasks / History / Diary / Settings**; UI thread polls `Store` every **0.6s** and drains the event `deque(maxlen=200)`.
 - Engine switch: `model_select` options follow the engine (`MODEL_OPTIONS` / `QWEN_MODEL_OPTIONS` / `SENSEVOICE_MODEL_OPTIONS`); invalid combos auto-corrected.
-- Row-level events: NiceGUI `$emit('open-path', path)` → `e.args` is `[path]` list, unpacked by `_first_arg(e)`; `_open_path()` degrades file → parent dir → output dir; explorer `/select,"path"` is quoted for spaces.
+- Row-level events: NiceGUI `$emit('open-path', path)` → `e.args` is `[path]` list, unpacked by `_first_arg(e)`; `_open_path()` degrades file → parent dir → output dir; explorer selection uses Shell API `SHOpenFolderAndSelectItems`.
+- **Safe notifications (v0.1.35)**: helper actions notify via `_notify()` — outside a NiceGUI slot context (tray thread / pure-logic tests) it degrades to logging instead of raising `RuntimeError`.
 - Launch mode: browser mode default (no WebView2 dependency); `BILI_FORCE_NATIVE=1` for pywebview; `BILI_PORT` overrides port (default 8765).
 
 ### 4.2 `pipeline.py` — Orchestration
-- **Concurrency (v0.1.34)**: `WORKERS = 2` threads drain the queue (download/convert overlap); **transcription protected by three lock layers**:
+- **Concurrency (v0.1.35)**: worker count is **configurable** (`Settings.workers`, clamped 1–6, default 2; `apply_settings` hot-rebuilds the pool when idle with no paused jobs); download/convert overlap; **transcription protected by three lock layers**:
   - `_model_lock` (pipeline): guards transcriber lazy-load/replacement on settings change.
   - Engine-level `self._lock`: serializes `transcribe()` so only one job holds model/VRAM.
   - Engine `load()` uses **double-checked locking**: null-check + load inside the lock, eliminating cold-start double-loads (fixed since v0.1.32, with concurrency regression tests for all three engines).
+- **Model prewarm (v0.1.35)**: `prewarm()` loads the model on a background thread (triggered by Settings save); idempotent (skips when a prewarm thread is running / queue busy / already loaded); after loading it verifies the instance is still current and unloads stale ones to prevent leaks.
+- **Idle model unload (v0.1.35)**: `maybe_unload_model(idle_sec=600)` — when the queue stays empty past 10 minutes, the model is unloaded to free VRAM/RAM; triggered from the worker idle branch, race-safe across workers (`_model_lock` + double check). All three engines implement locked, idempotent `unload()`.
 - **State machine**: `queued → downloading → converting → transcribing → extracting(optional) → saving → done / failed`; per-task pause/cancel via `task_control.py`.
 - **Resume-safe**: `audio_path` / `wav_path` cached and reused.
 - **Cleanup tolerance**: `OSError` from sandboxed deletion degrades to warning; job stays `done`.
 
 ### 4.3 `downloader.py` — Download Routing
 - **Platform routing** by hostname: `bilibili / youtube / douyin / xiaohongshu / kuaishou` (unknown → bilibili compat); media_id prefixes `yt_/dy_/xhs_/ks_`.
+- **Chunked concurrent download (v0.1.35)**: the download stage passes `http_chunk_size=10MB` (`_HTTP_CHUNK_SIZE`) so yt-dlp pulls ranged chunks over parallel connections — 3–5× faster on large files / throttled sources; probe stage does not download and omits it.
 - **Short links & security**: b23.tv expansion validates against a **domain whitelist** with **DNS-rebinding protection** (resolved-IP recheck) before following redirects; Douyin share links matched via `modal_id` / redirect regexes.
 - **Cookies/proxy**: `cookiefile` (cookies.txt) takes precedence over `cookiesfrombrowser`; unsupported browser names are ignored to keep YoutubeDL construction alive; proxy format `http://127.0.0.1:7890` / `socks5://…`.
 - **Reachability cache**: `_reach_cache` cleared on proxy change.
@@ -108,6 +113,8 @@ bili-transcriber/
 
 - **Lazy load + cache key**: `(model_size, device, compute_type, language, vad)`; reload only on change.
 - **VAD self-healing**: zero-segment results (music-only) auto-retry with VAD off.
+- **GPU batched inference (v0.1.35)**: whisper builds a `BatchedInferencePipeline` (`batch_size=8`, faster-whisper ≥1.0) when `device=cuda` — 2–4× speed-up; batch failure auto-falls back to sequential in `_run` (`CancelledError` re-raised, never retried). The Qwen3-ASR engine uses qwen-asr's native `List[audio]` batch API in groups of 4 chunks (mismatched result count or any error discards partial output and falls back to chunk-by-chunk; progress event format unchanged).
+- **Idle unload (v0.1.35)**: all three engines implement locked, idempotent `unload()` for pipeline idle recycling.
 - **Qwen chunked inference**: long audio split into 60s chunks, `on_event` reports "chunk i/n"; CPU users of 1.7B get a slow-model warning.
 
 ### 4.5 `models.py` — Model Management

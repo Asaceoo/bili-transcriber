@@ -197,6 +197,14 @@ class SenseVoiceTranscriber:
             )
         self._emit("SenseVoice 模型加载完成")
 
+    def unload(self) -> None:
+        """卸载模型释放内存(空闲回收用)。持锁卸载,进行中的转写不受影响。"""
+        with self._lock:
+            if self._model is None:
+                return
+            self._model = None
+        logger.info("SenseVoice 模型已卸载,释放内存")
+
     def transcribe(self, wav: Path, duration: float = 0.0,
                    progress: ProgressCallback | None = None) -> list[Segment]:
         """转写 wav,返回按时间排序的句子片段列表。duration>0 时按块结束时间估算进度。"""

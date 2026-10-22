@@ -367,3 +367,40 @@ def test_normalize_url_wechat_rejected_with_guide():
     from app.downloader import normalize_url
     with pytest.raises(DownloadError, match="微信视频号"):
         normalize_url("https://channels.weixin.qq.com/web/pages/feed/abc")
+
+
+# ---------- P0 优化:分段并发下载 ----------
+
+def test_download_audio_uses_http_chunk_concurrency(tmp_path: Path):
+    """下载阶段必须带 http_chunk_size(10MB 分段并发),probe 不带。"""
+    from app.downloader import _HTTP_CHUNK_SIZE
+    FakeYDL.script = [{"title": "分段下载"}, {}]
+    dl = Downloader(ydl_factory=lambda o: FakeYDL(o))
+    info = MediaInfo(media_id="BV1c_p1", bv="BV1c", title="分段下载", uploader="U",
+                     duration=60, url="https://x")
+    dl.download_audio(info, tmp_path)
+    kind, opts = FakeYDL.calls[-1]
+    assert kind == "download"
+    assert opts["http_chunk_size"] == _HTTP_CHUNK_SIZE == 10 * 1024 * 1024
+
+
+def test_download_video_uses_http_chunk_concurrency(tmp_path: Path):
+    """download_video(讲义补视频)同样启用分段并发。"""
+    from app.downloader import _HTTP_CHUNK_SIZE
+    FakeYDL.script = [{"title": "第一课", "ext": ".mp4"}]
+    dl = Downloader(ydl_factory=lambda o: FakeYDL(o))
+    info = MediaInfo(media_id="BV1t_p1", bv="BV1t", title="第一课", uploader="U",
+                     duration=60, url="https://x")
+    dl.download_video(info, tmp_path)
+    kind, opts = FakeYDL.calls[-1]
+    assert kind == "download"
+    assert opts["http_chunk_size"] == _HTTP_CHUNK_SIZE
+
+
+def test_probe_does_not_need_http_chunk():
+    """解析阶段不下载,无需分段并发参数。"""
+    FakeYDL.script = [{"info": {"id": "BV1s", "title": "t", "uploader": "u",
+                                "duration": 1, "webpage_url": "https://x"}}]
+    dl = Downloader(ydl_factory=lambda o: FakeYDL(o))
+    dl.probe("https://x")
+    assert "http_chunk_size" not in FakeYDL.calls[0][1]

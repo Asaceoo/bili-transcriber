@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from app.task_control import CancelledError
+
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], None]  # 0.0 ~ 1.0
@@ -49,6 +51,8 @@ class _TsItem:
 # ②单块文本短,生成 token 数远离上限,杜绝截断。
 _TS_CHUNK_SECONDS = 180
 _ASR_CHUNK_SECONDS = 120
+# 批量推理一次喂给模型的分块数:qwen-asr 原生支持 List[audio] 批量输入
+_BATCH_CHUNKS = 4
 
 # 生成 token 上限。qwen-asr transformers 后端默认 512:120 秒中文语音 ≈ 500 字
 # ≈ 600+ token,600s 长块(旧值)≈ 2400 字必然被截断——转写结果只剩开头一段,
@@ -258,6 +262,14 @@ class QwenASRTranscriber:
             )
         self._emit("Qwen3-ASR 模型加载完成,开始转写")
 
+    def unload(self) -> None:
+        """卸载模型释放显存/内存(空闲回收用)。持锁卸载,进行中的转写不受影响。"""
+        with self._lock:
+            if self._model is None:
+                return
+            self._model = None
+        logger.info("Qwen3-ASR 模型已卸载,释放内存/显存")
+
     def transcribe(self, wav: Path, duration: float = 0.0,
                    progress: ProgressCallback | None = None) -> list[Segment]:
         """转写 wav,返回按时间排序的片段列表。
@@ -281,34 +293,23 @@ class QwenASRTranscriber:
         chunk_sec = _TS_CHUNK_SECONDS if self._aligner_path is not None else _ASR_CHUNK_SECONDS
         chunks = _split_chunks(data, sr, chunk_sec)
         n = max(1, len(chunks))
+        # 按 _BATCH_CHUNKS 块一组批量推理(qwen-asr 原生 List[audio] 输入),
+        # 显存/吞吐更优;组数不足一块时也走批量(单元素列表等价单块)
+        batches = [chunks[i:i + _BATCH_CHUNKS] for i in range(0, len(chunks), _BATCH_CHUNKS)]
 
         pieces: list[str] = []
         merged_items: list[_TsItem] = []
         with self._lock:
-            for i, (cwav, offset_sec) in enumerate(chunks):
-                if progress is not None:
-                    progress(i / n)  # 块间检查暂停/取消,取消时由回调抛 CancelledError
-                self._emit(f"Qwen3-ASR 转写进度:{i + 1}/{n} 块")
-                results = self._model.transcribe(
-                    audio=(cwav, _WAV_SR),
-                    language=_map_qwen_language(self.language),
-                    return_time_stamps=self._aligner_path is not None,
-                )
-                text = results[0].text.strip() if results and results[0].text else ""
-                if text:
-                    pieces.append(text)
-                    timestamps = getattr(results[0], "time_stamps", None)
-                    items = getattr(timestamps, "items", None) if timestamps is not None else None
-                    if items:
-                        for it in items:
-                            t = getattr(it, "text", "") or ""
-                            if not t:
-                                continue
-                            merged_items.append(_TsItem(
-                                text=t,
-                                start_time=self._ts_value(it, "start_time", 0.0) + offset_sec,
-                                end_time=self._ts_value(it, "end_time", 0.0) + offset_sec,
-                            ))
+            try:
+                self._transcribe_batches(batches, n, pieces, merged_items, progress)
+            except CancelledError:
+                raise  # 用户取消不作回退,直接上抛
+            except Exception:
+                # 批量路径失败(模型异常/返回数量不符):丢弃半成品,整体回退逐块推理
+                logger.exception("Qwen 批量转写失败,回退逐块推理")
+                pieces.clear()
+                merged_items.clear()
+                self._transcribe_sequential(chunks, n, pieces, merged_items, progress)
         if progress is not None:
             progress(1.0)  # 终值,同时作为最后一次取消检查
 
@@ -320,6 +321,63 @@ class QwenASRTranscriber:
             return self._merge_items_to_segments(merged_items, full_text)
         # 无对齐器:按句切分,时间在总时长内线性估算
         return self._estimate_segments(full_text, total_sec)
+
+    def _transcribe_batches(self, batches: list, n: int, pieces: list[str],
+                            merged_items: list, progress: ProgressCallback | None) -> None:
+        """批量推理:每组分块一次喂给模型,逐块消费结果并按偏移合并。"""
+        done = 0
+        for batch in batches:
+            if progress is not None:
+                progress(done / n)  # 组间检查暂停/取消,取消时由回调抛 CancelledError
+            self._emit(f"Qwen3-ASR 批量转写:第 {done + 1}~{done + len(batch)}/{n} 块")
+            results = list(self._model.transcribe(
+                audio=[(cwav, _WAV_SR) for cwav, _ in batch],
+                language=_map_qwen_language(self.language),
+                return_time_stamps=self._aligner_path is not None,
+            ) or [])
+            if len(results) != len(batch):
+                raise RuntimeError(f"批量转写返回数量不符:{len(results)}/{len(batch)}")
+            for (_cwav, offset_sec), res in zip(batch, results):
+                done += 1
+                self._consume_result(res, offset_sec, pieces, merged_items)
+                if progress is not None:
+                    progress(done / n)
+                self._emit(f"Qwen3-ASR 转写进度:{done}/{n} 块")
+
+    def _transcribe_sequential(self, chunks: list, n: int, pieces: list[str],
+                               merged_items: list, progress: ProgressCallback | None) -> None:
+        """逐块推理(批量失败时的回退路径,逻辑与原实现一致)。"""
+        for i, (cwav, offset_sec) in enumerate(chunks):
+            if progress is not None:
+                progress(i / n)  # 块间检查暂停/取消
+            self._emit(f"Qwen3-ASR 转写进度:{i + 1}/{n} 块")
+            results = self._model.transcribe(
+                audio=(cwav, _WAV_SR),
+                language=_map_qwen_language(self.language),
+                return_time_stamps=self._aligner_path is not None,
+            )
+            self._consume_result(results[0] if results else None, offset_sec,
+                                 pieces, merged_items)
+
+    def _consume_result(self, res, offset_sec: float, pieces: list[str],
+                        merged_items: list) -> None:
+        """消费单块结果:文本拼接 + 字级时间戳按块起始时间偏移合并。"""
+        text = (res.text or "").strip() if res is not None and res.text else ""
+        if not text:
+            return
+        pieces.append(text)
+        timestamps = getattr(res, "time_stamps", None)
+        items = getattr(timestamps, "items", None) if timestamps is not None else None
+        if items:
+            for it in items:
+                t = getattr(it, "text", "") or ""
+                if not t:
+                    continue
+                merged_items.append(_TsItem(
+                    text=t,
+                    start_time=self._ts_value(it, "start_time", 0.0) + offset_sec,
+                    end_time=self._ts_value(it, "end_time", 0.0) + offset_sec,
+                ))
 
     @staticmethod
     def _read_wav_16k(wav: Path) -> tuple:
