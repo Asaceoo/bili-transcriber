@@ -43,3 +43,7 @@ _publish_bili_skills/
 tmp_bili_p8/
 commit_msg_v*.txt
 docs/_*.py
+
+# Cookie 凭据(ego lite 导出,绝不入库)
+*-cookies.txt
+cookies.txt
