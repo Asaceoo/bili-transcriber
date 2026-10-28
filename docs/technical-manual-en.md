@@ -154,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (24 files / 344 cases)
+├── tests/                      # pytest (24 files / 346 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -590,7 +590,7 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **24 files / 344 cases**, green in about 200 seconds.
+`tests/` holds **24 files / 346 cases**, green in about 200 seconds.
 
 | Area | Files | Strategy |
 |---|---|---|

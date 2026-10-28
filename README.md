@@ -10,7 +10,7 @@
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
 [![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-344%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-346%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
 </div>
@@ -502,7 +502,7 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 344 passed
+.venv\Scripts\pytest -q                    # 当前 346 passed
 .venv\Scripts\python -m app.main           # 开发运行
 ```
 

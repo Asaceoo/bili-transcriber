@@ -153,7 +153,7 @@ bili-transcriber/
 │   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
 │   ├── e2e_check.py            # 端到端链路检查
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（24 文件 / 344 用例）
+├── tests/                      # pytest（24 文件 / 346 用例）
 ├── docs/                       # 双语手册 + assets/ 概念图
 ├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
 ├── output/                     # 转写产物（运行时）
@@ -589,7 +589,7 @@ python scripts/release.py --single-only# 仅重建单文件版
 
 ## 12. 测试体系
 
-`tests/` 共 **24 个文件 / 344 用例**，全绿耗时约 200 秒。
+`tests/` 共 **24 个文件 / 346 用例**，全绿耗时约 200 秒。
 
 | 领域 | 文件 | 策略 |
 |---|---|---|
