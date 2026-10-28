@@ -1,8 +1,8 @@
 # bili-transcriber — Technical Manual (English)
 
 > For developers and maintainers. Covers layering, the concurrency model, the state machine, module responsibilities, data contracts, security boundaries, packaging pitfalls, and the test suite.
-> This manual matches **v0.1.40** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
-> The versioned release copy is [technical-manual-en-0.1.40.md](technical-manual-en-0.1.40.md).
+> This manual matches **v0.1.41** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [technical-manual-en-0.1.41.md](technical-manual-en-0.1.41.md).
 
 ---
 
@@ -102,7 +102,7 @@ Input: a link (Bilibili/Douyin/Xiaohongshu/Kuaishou/YouTube) or a local media fi
 | Engine 2 | qwen-asr (Qwen3-ASR 0.6B / 1.7B, torch backend) |
 | Engine 3 | sherpa-onnx (SenseVoiceSmall, ONNX int8) |
 | Keyframes | FFmpeg scene detection (primary) / PyAV frame-diff MAD (fallback) |
-| UI | NiceGUI (Quasar components), browser mode by default; pywebview optional |
+| UI | NiceGUI (Quasar components) + pywebview native window (WebView2); falls back to the browser without WebView2 |
 | Tray | pystray (silent degradation on failure) |
 | Native dialog | ctypes comdlg32 |
 | Single instance | ctypes `CreateMutexW` |
@@ -154,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (24 files / 372 cases)
+├── tests/                      # pytest (25 files / 397 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -308,13 +308,59 @@ def data_dir() -> Path   # app_root()/data
 
 `main()` order (the order is the correctness):
 
-1. `setup_logging()`
-2. Resolve port (`BILI_PORT`, default 8765)
-3. **Single-instance check** → on failure `webbrowser.open(existing_url)` then `return`
-4. `pipeline.start()` (including leftover recovery)
-5. Tray, UI, browser open
+1. Early return for spawned children (`_is_spawn_child()` → `return`)
+2. `setup_logging()`
+3. Resolve port (`BILI_PORT`, default 8765)
+4. `_resolve_ui_mode()` → single-instance check → on failure **raise the existing window** and `return`
+5. `pipeline.start()` (including leftover recovery)
+6. Tray → WebView2 storage dir → window watchdog → `ui.run()`
 
 The single-instance check must precede `pipeline.start()` — otherwise the second process would first mark tasks as queued and then get evicted, leaving dirty state.
+
+**Why step 1 exists**: from source, `multiprocessing` re-executes this module as `__mp_main__` via `runpy`, which also hits the entry guard. Continuing into `main()` would start a second server and fight over the port. Frozen builds are intercepted earlier by `multiprocessing.freeze_support()` (`--multiprocessing-fork`), so the early return is a no-op there.
+
+**UI mode (`_resolve_ui_mode`)**
+
+| Condition | Result |
+|---|---|
+| `BILI_FORCE_BROWSER=1` | `(native=False, show=True)` |
+| `BILI_FORCE_NATIVE=1` | `(native=True, show=False)` |
+| win32 with WebView2 detected | `(native=True, show=False)` — **default** |
+| otherwise | `(native=False, show=True)` |
+
+Trap: inside `nicegui.ui.run()` there is
+
+```python
+if window_size: native = True
+```
+
+Passing `window_size` **forces native mode**, silently overriding `native=False`. The old "browser by default" switch therefore never took effect — `use_native=False` was printed while the app actually ran natively. `window_size` is now passed only when native is intended.
+
+**Second double-click** (`_activate_existing_window`)
+
+After losing the mutex the second process no longer calls `webbrowser.open` and returns (the "a browser pops up and the app vanishes" symptom). It **polls `FindWindowW` for up to 30 s**, then `ShowWindow(SW_RESTORE)` + `SetForegroundWindow`, then exits. Polling is required: a cold start spends 10–20 s importing torch/transformers, so an immediate "no window" verdict would wrongly take the browser branch. If no window appears and native mode is active, a `MessageBoxW` explains it instead of opening a browser.
+
+**WebView2 user data folder** (`_configure_native_window`)
+
+With `private_mode` (the default) pywebview sets the WebView2 `UserDataFolder` to
+
+```python
+cache_dir = tempfile.TemporaryDirectory().name   # webview/platforms/winforms.py
+```
+
+The `TemporaryDirectory()` instance is **immediately collected**, its finalizer deletes the directory, and WebView2 keeps writing into it — the renderer crashes, the window disappears, and NiceGUI's `check_shutdown` thread sees a dead window process and calls `core.stop_and_exit()`. The whole app **exits silently with code 0 and nothing in the log**. That is the root cause of "it disappears after a few minutes".
+
+Fix: before `ui.run()`, pin the storage path:
+
+```python
+nicegui_app.native.start_args["storage_path"] = str(DATA_DIR / "webview2")
+```
+
+The directory is stable, and instances under different install dirs no longer share one WebView2 profile.
+
+**The trap we hit**: the first attempt used `native.settings["storage_path"] = …`, and the window process died with `KeyError: "Cannot add new key 'storage_path'. Only existing keys can be modified."` — `webview.settings` is an `ImmutableDict` that only allows modifying existing keys (`webview/util.py`); `start_args` is what actually reaches `webview.start(**…)`. The error came from a real run, not from reasoning.
+
+**Window watchdog** (`_watch_native_window`): a background thread checks for the window every 0.5 s, logs the time-to-ready, and after 60 s logs an `ERROR` pointing at `BILI_FORCE_BROWSER=1`. A windowed exe has no console, so diagnostics belong in the log file.
 
 The UI thread polls `Store` every **0.6 s** and drains an event `deque(maxlen=200)`.
 
@@ -607,7 +653,7 @@ if info.total_parts > 1:
 | transformers mis-detects sklearn → `GenerationMixin` import crash | Spec `excludes=["sklearn"]` + `preload_transformers.py` hook setting `_sklearn_available=False` |
 | nagisa bare-imports `prepro` (PEP 366 failure) | Hook inserts the nagisa package dir into `sys.path` (importing `nagisa.prepro` causes a circular import); hiddenimports add `nagisa/dynet/_dynet` |
 | Sandbox safe-delete hook blocks PyInstaller cleanup | `release.py` calls `_evacuate()` to rename old dist/build aside so `--noconfirm` has nothing to delete |
-| onefile native window shows blank | Browser mode is default; `BILI_FORCE_NATIVE=1` opts in explicitly |
+| native window misbehaves | WebView2 storage dir is pinned; `BILI_FORCE_BROWSER=1` falls back to the browser |
 | CUDA DLL resolution | `__init__.py` injects `sys._MEIPASS` into the search path in frozen mode; `gpu_runtime` registers the external pack |
 | **Windowed exe stdout is GBK** | CLI encoding probe + `ensure_ascii` fallback; log handler skipped when `sys.stderr is None` |
 | **`console=False` leaves stdin/stdout as None** | `logging_setup` null-guards; MCP `_reopen_null_streams()` fails explicitly instead of `AttributeError` |
@@ -654,7 +700,7 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **24 files / 372 cases**, green in 1–3 minutes.
+`tests/` holds **25 files / 397 cases**, green in 1–3 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|

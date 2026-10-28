@@ -10,12 +10,12 @@
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
 [![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-372%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-397%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
 </div>
 
-> 本 README 对应 **v0.1.40** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
+> 本 README 对应 **v0.1.41** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
 
 ---
 
@@ -82,8 +82,9 @@
 
 - **断点续跑** — 失败重跑跳过已完成的下载 / 转码。
 - **图文讲义** — 自动识别 PPT 翻页画面，生成「时间戳 + 截图 + 该页字幕」的讲义。
-- **系统托盘** — 关窗不退出，任务继续跑。
-- **单实例保护** — 重复启动只会把已有窗口调出来，不会抢同一个任务。
+- **独立程序窗口** — 双击直接开原生窗口（WebView2），不再被丢进浏览器；没装 WebView2 才自动退回浏览器。
+- **系统托盘** — 托盘图标可唤回窗口或退出。
+- **单实例保护** — 重复启动只会把已有窗口提到前台，不会抢同一个任务、也不会闪退。
 - **CLI + MCP 双通道** — 命令行与 AI 软件都能调；两个通道各有开关，设置页一键关闭。
 - **纯本地** — 转写过程不调用任何外部 AI API。
 
@@ -132,7 +133,7 @@ python -m venv .venv
 # 2. 跑
 .venv\Scripts\python -m app.main
 
-# 3. 浏览器自动打开 http://127.0.0.1:8765
+# 3. 弹出独立程序窗口(冷启动 10-20 秒)
 ```
 
 在输入框粘贴 `https://www.bilibili.com/video/BV1xxxxxxxxx`，点「添加」。
@@ -477,10 +478,13 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 模型包不完整，删掉该目录让程序重新下载。
 
 **Q7 端口被占用？**
-`BILI_PORT=9000` 换端口。若提示「已有实例在运行」，那是单实例保护，不是故障。
+`BILI_PORT=9000` 换端口。重复双击只会把已有窗口提到前台，那是单实例保护，不是故障。
 
 **Q8 关了窗口任务还在跑吗？**
-在。程序退到托盘继续转写，托盘图标可重新打开窗口。
+原生窗口模式下关窗即退出程序（未完成的任务下次启动会续跑）。想让界面消失但继续跑，最小化到托盘即可；托盘图标可唤回窗口。
+
+**Q8.1 窗口开不出来 / 一开就没了？**
+设 `BILI_FORCE_BROWSER=1` 用浏览器界面，功能完全一样。
 
 **Q9 能同时跑多个任务吗？**
 能。下载 / 转码并发（默认 2 路），**转写串行** —— 避免多个任务抢同一块显存导致 OOM。
@@ -519,7 +523,7 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 372 passed
+.venv\Scripts\pytest -q                    # 当前 397 passed
 .venv\Scripts\python -m app.main           # 开发运行
 ```
 

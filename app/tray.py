@@ -17,16 +17,18 @@ logger = logging.getLogger(__name__)
 class SystemTray:
     """系统托盘图标。
 
-    - 左键/双击:打开主窗口(默认浏览器打开应用 URL)
+    - 左键/双击:打开主窗口(原生窗口模式优先唤回窗口,否则用浏览器打开)
     - 右键菜单:打开主窗口 / 退出
     """
 
     def __init__(self, url: str, icon_path: str, title: str = "B站音频本地转写",
-                 on_exit: Callable[[], None] | None = None):
+                 on_exit: Callable[[], None] | None = None,
+                 on_open: Callable[[], None] | None = None):
         self.url = url
         self.icon_path = icon_path
         self.title = title
         self.on_exit = on_exit
+        self.on_open = on_open
         self._icon = None
         self._thread: threading.Thread | None = None
 
@@ -64,6 +66,13 @@ class SystemTray:
             logger.exception("托盘运行失败")
 
     def _open_main(self, icon=None, item=None) -> None:
+        # 原生窗口模式下"打开主窗口"是把窗口提到前台,不能再抛一个浏览器标签页出来
+        if self.on_open is not None:
+            try:
+                if self.on_open():
+                    return
+            except Exception:  # noqa: BLE001 — 回调失败再走浏览器兜底
+                logger.exception("唤醒主窗口失败,退回浏览器打开")
         try:
             webbrowser.open(self.url)
         except Exception:  # noqa: BLE001

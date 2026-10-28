@@ -13,6 +13,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any
 
 from nicegui import ui
 
@@ -63,6 +67,146 @@ def _has_webview2() -> bool:
 
 
 _instance_mutex = None  # 进程存活期间保持句柄,进程退出由 OS 释放
+
+WINDOW_TITLE = "B站音频本地转写"
+
+
+def _env_flag(name: str) -> bool:
+    """布尔型环境变量:未设置、"0"、"false"、"no"、"off" 都算关闭。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _find_window(title: str = WINDOW_TITLE) -> int:
+    """按标题查原生窗口句柄;没有则返回 0。"""
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.FindWindowW.restype = wintypes.HWND
+        return int(user32.FindWindowW(None, title) or 0)
+    except Exception:  # noqa: BLE001 — 查不到不该影响启动
+        logger.exception("查找窗口失败")
+        return 0
+
+
+def _activate_window(hwnd: int) -> bool:
+    """还原并置顶窗口(SW_RESTORE 对最小化/隐藏都有效)。"""
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        return bool(user32.SetForegroundWindow(hwnd))
+    except Exception:  # noqa: BLE001
+        logger.exception("窗口提到前台失败")
+        return False
+
+
+def _activate_existing_window(title: str = WINDOW_TITLE, wait_s: float = 30.0) -> bool:
+    """唤醒已在运行的那个窗口;返回是否成功。
+
+    冷启动要先导入 torch/transformers,原生窗口十几秒后才出现。第二次双击时
+    如果立刻判定"没有窗口",就会退回浏览器 —— 用户看到的正是"一点就弹浏览器",
+    所以这里轮询等待,窗口一出现就把它提到前台。
+    """
+    if sys.platform != "win32":
+        return False
+    deadline = time.monotonic() + max(0.0, wait_s)
+    while True:
+        hwnd = _find_window(title)
+        if hwnd:
+            return _activate_window(hwnd)
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.3)
+
+
+def _message_box(text: str, title: str = WINDOW_TITLE) -> None:
+    """窗口态 exe 没有控制台,给用户的提示只能走原生消息框。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            # MB_ICONINFORMATION | MB_SETFOREGROUND
+            ctypes.windll.user32.MessageBoxW(None, text, title, 0x40 | 0x10000)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("消息框弹出失败")
+    _print_err(f"{title}: {text}")
+
+
+def _resolve_ui_mode() -> tuple[bool, bool]:
+    """决定界面形态,返回 (use_native, show)。
+
+    默认原生窗口:双击 exe 就该看到一个独立程序窗口,而不是被丢进浏览器。
+    只有目标机没有 WebView2 运行时,或显式设了 BILI_FORCE_BROWSER=1 才退回浏览器。
+    """
+    if _env_flag("BILI_FORCE_BROWSER"):
+        use_native = False
+    elif _env_flag("BILI_FORCE_NATIVE"):
+        use_native = True
+    else:
+        use_native = sys.platform == "win32" and _has_webview2()
+    show = not use_native and not _env_flag("BILI_NO_BROWSER")
+    return use_native, show
+
+
+def _configure_native_window() -> None:
+    """给 WebView2 指定固定的用户数据目录。
+
+    pywebview 在 private_mode(默认)下把 WebView2 的 UserDataFolder 设成
+    `tempfile.TemporaryDirectory().name`:那个临时对象当场就被回收,目录随即
+    被删,WebView2 却还在往里写 —— 渲染进程崩溃,窗口消失,NiceGUI 的
+    check_shutdown 发现窗口进程已死就调用 stop_and_exit,整个程序静默退出
+    (退出码 0、日志无任何报错)。这正是"开着几分钟自己没了"的根因。
+    固定到 data/webview2 后不会再有目录被回收,顺带让不同安装目录的实例
+    各用各的 profile,不再抢同一个 WebView2 目录。
+    """
+    try:
+        from nicegui import app as nicegui_app
+
+        candidates = [DATA_DIR / "webview2"]
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            # 装到 Program Files 时 data/ 可能不可写,退到每用户目录
+            candidates.append(Path(local_appdata) / "Bili Note" / "webview2")
+        path = None
+        for candidate in candidates:
+            try:
+                Path(candidate).mkdir(parents=True, exist_ok=True)
+                path = candidate
+                break
+            except OSError:
+                logger.warning("原生窗口数据目录不可写,换下一个: %s", candidate)
+        if path is None:
+            logger.error("找不到可写的原生窗口数据目录,沿用 pywebview 默认值(可能不稳定)")
+            return
+        # 注意走 start_args 而不是 settings:nicegui 把 settings 传给
+        # `webview.settings.update(**...)`,那是个只允许改已有键的 ImmutableDict,
+        # 多塞一个键会让子进程直接 KeyError;start_args 才是 `webview.start(**...)` 的入参。
+        # 只要 storage_path 有值,pywebview 的 init_storage 就不会用 TemporaryDirectory。
+        nicegui_app.native.start_args["storage_path"] = str(path)
+    except Exception:  # noqa: BLE001 — 配置失败退回默认值,不阻断启动
+        logger.exception("设置原生窗口数据目录失败,继续使用默认值")
+
+
+def _watch_native_window(wait_s: float = 60.0) -> None:
+    """记录窗口就绪耗时;迟迟不出现时留下可诊断的错误日志。"""
+    start = time.monotonic()
+    while time.monotonic() - start < wait_s:
+        if _find_window():
+            logger.info("原生窗口已就绪(进程启动后 %.1f 秒)", time.monotonic() - start)
+            return
+        time.sleep(0.5)
+    logger.error(
+        "原生窗口 %.0f 秒内没有出现;可设 BILI_FORCE_BROWSER=1 改用浏览器界面", wait_s
+    )
 
 
 def _is_spawn_child() -> bool:
@@ -181,6 +325,12 @@ def _dispatch_headless(argv: list[str]) -> int | None:
 
 
 def main() -> None:
+    if _is_spawn_child():
+        # spawn 出来的子进程只负责开窗(multiprocessing 会把 target 传进去)。
+        # 走到这里说明它把入口又跑了一遍 —— 源码模式下 multiprocessing 用
+        # runpy 以 __mp_main__ 重执行本模块,就会这样;此时必须立刻返回,
+        # 否则会再起一个服务、再抢一次端口。
+        return
     code = _dispatch_headless(sys.argv[1:])
     if code is not None:
         raise SystemExit(code)
@@ -191,15 +341,32 @@ def main() -> None:
     except ValueError:
         # 环境变量被误设成非数字(如 "abc")时回退默认端口,避免启动即崩溃
         port = 8765
+    # 界面形态先定下来:下面的"已有实例"分支要靠它决定是唤醒窗口还是兜底开浏览器
+    use_native, show = _resolve_ui_mode()
+    logger.info(
+        "界面模式:%s(WebView2=%s, show=%s)",
+        "原生窗口" if use_native else "浏览器",
+        _has_webview2() if sys.platform == "win32" else "n/a",
+        show,
+    )
     # 单实例:已经有桌面端在跑时不再启动第二份(否则同一任务会被并行处理两次)
     if not _acquire_single_instance():
-        _print_err("[bili main] 检测到已有实例在运行,打开现有窗口后退出")
-        logger.info("已有实例在运行,本进程退出")
-        try:
-            import webbrowser
-            webbrowser.open(f"http://127.0.0.1:{port}")
-        except Exception:  # noqa: BLE001 — 打不开浏览器不影响退出
-            pass
+        logger.info("已有实例在运行,尝试把它的窗口提到前台")
+        if _activate_existing_window():
+            logger.info("已唤醒现有窗口,本进程退出")
+            return
+        # 没有窗口可唤醒:原生模式下给个提示,浏览器模式才开浏览器
+        if use_native:
+            _message_box(
+                "B站音频本地转写已经在运行。\n请从任务栏或系统托盘打开它的窗口。"
+            )
+        else:
+            try:
+                import webbrowser
+
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            except Exception:  # noqa: BLE001 — 打不开浏览器不影响退出
+                pass
         return
     # 启动即拉起工作线程:顺带恢复上次会话遗留的"排队中/已暂停/进行中"任务。
     # 之前只有"提交新任务"才会 start(),关闭应用时排队中的任务没人消费,
@@ -210,58 +377,48 @@ def main() -> None:
         logger.exception("启动任务管道失败")
     if os.environ.get("BILI_TEST_IMPORTS"):
         _test_imports()
-    # 默认走浏览器模式:pywebview 在 PyInstaller --onefile 解压环境下原生窗口会白屏,
-    # 且依赖目标机 WebView2 运行时;浏览器模式 100% 可靠(只要目标机装了任意浏览器)。
-    # 设 BILI_FORCE_NATIVE=1 可强制原生窗口(前提是 WebView2 已安装)。
-    use_native = False
-    show = True
-    if os.environ.get("BILI_FORCE_NATIVE"):
-        use_native = True
-        _print_err("[bili main] BILI_FORCE_NATIVE set, native window mode")
-    elif sys.platform == "win32" and _has_webview2():
-        # 检测到 WebView2 时仍给用户一个切换到原生的口子(便于高级用户)
-        # 默认仍走浏览器模式,只在显式 BILI_FORCE_NATIVE 时切
-        _print_err(
-            "[bili main] WebView2 detected but defaulting to browser mode. "
-            "Set BILI_FORCE_NATIVE=1 to use the native window."
-        )
-    elif sys.platform == "win32":
-        _print_err(
-            "[bili main] WebView2 not detected, browser mode forced. "
-            "Install WebView2 (https://developer.microsoft.com/microsoft-edge/webview2/) "
-            "and set BILI_FORCE_NATIVE=1 to use native window."
-        )
-    if os.environ.get("BILI_NO_BROWSER"):
-        show = False
-    _print_err(
-        f"[bili main] BILI_FORCE_BROWSER={os.environ.get('BILI_FORCE_BROWSER')!r} "
-        f"BILI_FORCE_NATIVE={os.environ.get('BILI_FORCE_NATIVE')!r} "
-        f"BILI_NO_BROWSER={os.environ.get('BILI_NO_BROWSER')!r} "
-        f"use_native={use_native} show={show}"
-    )
     # 系统托盘:常驻后台,可"打开主窗口"或"退出"。浏览器模式关闭窗口后服务仍在,
     # 托盘是重新打开窗口/彻底退出的入口。托盘不可用时静默降级,不影响主程序。
     tray = None
-    if not os.environ.get("BILI_NO_TRAY"):
+    if not _env_flag("BILI_NO_TRAY"):
         try:
             tray = SystemTray(
                 url=f"http://127.0.0.1:{port}",
                 icon_path=str(APP_ICON) if APP_ICON else "",
-                title="B站音频本地转写",
+                title=WINDOW_TITLE,
                 on_exit=_tray_exit,
+                # 原生模式下"打开主窗口"是把那个窗口提到前台,不该再开浏览器
+                on_open=(
+                    (lambda: _activate_existing_window(WINDOW_TITLE, wait_s=0.0))
+                    if use_native
+                    else None
+                ),
             )
             tray.start()
         except Exception:
             logger.exception("系统托盘启动失败")
-    ui.run(
-        title="B站音频本地转写",
-        native=use_native,
-        window_size=(980, 720),
-        port=port,
-        reload=False,
-        favicon=str(APP_ICON) if APP_ICON else "🅑",
-        show=show,
-    )
+    if use_native:
+        _configure_native_window()
+        threading.Thread(
+            target=_watch_native_window, name="window-watch", daemon=True
+        ).start()
+    run_kwargs: dict[str, Any] = {
+        "title": WINDOW_TITLE,
+        "port": port,
+        "reload": False,
+        "favicon": str(APP_ICON) if APP_ICON else "🅑",
+        "native": use_native,
+        "show": show,
+    }
+    if use_native:
+        # window_size 不传时 nicegui 用 800x600;注意它本身也会把 native 置 True,
+        # 所以只在确实要原生窗口时才带这个参数。
+        run_kwargs["window_size"] = (980, 720)
+    started = time.monotonic()
+    try:
+        ui.run(**run_kwargs)
+    finally:
+        logger.info("界面已退出,本次运行 %.1f 秒", time.monotonic() - started)
     # ui.run 返回后进程随即退出(托盘"退出"经 app.shutdown 走到这里);
     # 不做显式清理:daemon 线程随进程消亡,避免测试环境 timer 访问已关闭的 store。
 
