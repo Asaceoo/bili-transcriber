@@ -1,8 +1,8 @@
 # bili-transcriber — User Guide (English)
 
 > For end users. Covers installation, the three tabs, every setting, output layout, and troubleshooting.
-> This guide matches **v0.1.39** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
-> The versioned release copy is [user-guide-en-0.1.39.md](user-guide-en-0.1.39.md).
+> This guide matches **v0.1.40** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [user-guide-en-0.1.40.md](user-guide-en-0.1.40.md).
 
 ---
 
@@ -515,6 +515,8 @@ Exit codes:
 | 3 | channel disabled in Settings |
 
 `--json` output is always valid JSON (NaN/Infinity become `null`), and an early pipe close (`… | head -1`) no longer prints a traceback.
+
+**Encoding**: when output is captured by a pipe or redirect it is always UTF-8, so AI clients that parse UTF-8 never see mojibake; on a real terminal the console code page is kept so `cmd.exe` does not garble the screen. Both the human-readable and the machine-readable copy come out correct.
 
 Tasks submitted with `--no-wait` are not lost: **the next desktop launch resumes every leftover in-progress task**, including ones killed mid-run.
 

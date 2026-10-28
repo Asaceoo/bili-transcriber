@@ -1,8 +1,8 @@
 # bili-transcriber 用户手册（中文）
 
 > 面向使用者。讲清安装、界面、设置、输出与排障。
-> 本手册对应 **v0.1.39** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
-> 带版本号的发布快照见 [user-guide-zh-0.1.39.md](user-guide-zh-0.1.39.md)。
+> 本手册对应 **v0.1.40** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
+> 带版本号的发布快照见 [user-guide-zh-0.1.40.md](user-guide-zh-0.1.40.md)。
 
 ---
 
@@ -517,6 +517,8 @@ bili-transcriber-cli --prewarm --json
 | 3 | 通道已在设置页关闭 |
 
 另外，`--json` 的输出永远是合法 JSON（NaN/Infinity 会被替换成 `null`），管道提前关闭（如 `… | head -1`）也不会抛 traceback。
+
+**编码**：输出被管道或重定向接管时一律 UTF-8，AI 客户端按 UTF-8 解析不会乱码；留在终端里则沿用控制台代码页，`cmd.exe` 不会花屏。所以同一份数据，「人看」和「程序读」都拿得到正确文本。
 
 ### 10.2 MCP（给 AI 客户端用）
 

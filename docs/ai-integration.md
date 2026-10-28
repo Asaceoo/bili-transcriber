@@ -214,6 +214,7 @@ get_transcript(media_id)
 | `解析失败:...` | 链接失效/需要登录/网络不可达;检查 cookies 与代理设置 |
 | `尚无 md 产物` | 任务尚未完成或失败;先 `job_status` 看 `status`/`error` |
 | 中文乱码 | 客户端需按 UTF-8 解析 stdio;服务端已强制 UTF-8 输出 |
+| CLI 的 JSON 读出来是乱码(仅 MCP 正常) | 0.1.39 及更早的 CLI 在中文 Windows 下按 GBK 写 stdout。0.1.40 起被管道接管时强制 UTF-8;升级后重试,或临时设 `PYTHONUTF8=1` 再调 |
 | 启动即退出,stderr 说「通道已在桌面端「设置」中关闭」 | 设置页关掉了 MCP 开关,勾回来保存即可(或把 `settings.json` 的 `enable_mcp` 改 `true`) |
 | 日志里出现 `database is locked` | 0.1.39 及更早:桌面端与 MCP 同时写 `history.db` 撞锁。0.1.40 起 `busy_timeout=5000`,升级即可 |
 | 客户端把整段会话断开 | 旧版遇到非 UTF-8 字节会崩;0.1.40 起降级为 `-32700` 解析错误并继续 |

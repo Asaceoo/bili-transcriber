@@ -75,6 +75,31 @@ def _stream_encoding() -> str:
     return getattr(sys.stdout, "encoding", None) or "utf-8"
 
 
+def _configure_output_encoding(streams: list[Any] | None = None) -> None:
+    """输出被管道/重定向时强制 UTF-8;留在终端时保持控制台编码。
+
+    打包版不继承调用方的 PYTHONUTF8/PYTHONIOENCODING(PyInstaller 自带运行时),
+    中文 Windows 下 stdout 编码取系统 ANSI 代码页 cp936。此时 JSON 里的中文
+    会按 GBK 写出 —— 本机 `text=True` 的子进程能读,但按 UTF-8 解析的 AI 客户端
+    (Node child_process、指定 encoding="utf-8" 的 Python 调用方)会得到乱码或
+    直接 UnicodeDecodeError,而这正是 CLI 通道的主要使用者。
+
+    之所以在这里改流而不是继续靠 `_dump_json` 降级 ASCII:GBK 装得下常用汉字,
+    降级分支根本不会触发,输出仍是"人类能看、机器读错"的 GBK。
+
+    终端(isatty)不动:cmd.exe 默认代码页写 UTF-8 会花屏,人读的那份要顺着控制台。
+    """
+    for stream in (sys.stdout, sys.stderr) if streams is None else streams:
+        if stream is None:
+            continue
+        try:
+            if stream.isatty():
+                continue
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass  # 非常规流(已包装/已关闭)保持原样,不影响主流程
+
+
 def _dump_json(payload: Any, indent: int | None = 2) -> str:
     """序列化并确保目标流编码装得下。
 
@@ -158,6 +183,8 @@ def _job_line(job: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 先定编码再解析参数:argparse 的 usage 走 stderr,也要跟着 UTF-8
+    _configure_output_encoding()
     args = _build_parser().parse_args(argv)
     if args.version:
         # --version 不受通道开关影响:它只是一行版本号,留着便于排查

@@ -1,8 +1,8 @@
 # bili-transcriber — Technical Manual (English)
 
 > For developers and maintainers. Covers layering, the concurrency model, the state machine, module responsibilities, data contracts, security boundaries, packaging pitfalls, and the test suite.
-> This manual matches **v0.1.39** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
-> The versioned release copy is [technical-manual-en-0.1.39.md](technical-manual-en-0.1.39.md).
+> This manual matches **v0.1.40** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [technical-manual-en-0.1.40.md](technical-manual-en-0.1.40.md).
 
 ---
 
@@ -154,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (24 files / 369 cases)
+├── tests/                      # pytest (24 files / 372 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -392,6 +392,14 @@ Test with `PYTHONIOENCODING=gbk` and verify the output is still valid JSON (ASCI
 `--version` bypasses the gate — at least you can still get the version while debugging.
 
 **Broken pipes don't raise.** `cli ... | head -1` closes stdout early; Python raises `BrokenPipeError`, the exit code becomes 1 and scripts read it as "job failed". `_write()` catches `(BrokenPipeError, OSError, ValueError)` and points `sys.stdout` at `devnull`, which also avoids a second `Exception ignored in: <_io.TextIOWrapper>` flush at interpreter shutdown.
+
+**Piped output is forced to UTF-8.** The first line of `main()` is `_configure_output_encoding()`: if `stdout`/`stderr` are not a tty (redirected, or a pipe from a parent process), they get `reconfigure(encoding="utf-8", errors="replace")`; a real terminal keeps the console code page.
+
+Why this matters: the frozen build embeds its own runtime and **does not inherit the caller's `PYTHONUTF8` / `PYTHONIOENCODING`**, so on Chinese Windows stdout uses the ANSI code page `cp936`. JSON then goes out as GBK — fine for a local `subprocess.run(..., text=True)` that decodes with the locale, but a client that parses UTF-8 (Node `child_process`, Python with an explicit `encoding="utf-8"`) gets mojibake or a hard `UnicodeDecodeError`, and those are exactly the consumers of the CLI channel.
+
+The earlier implementation only fell back to `ensure_ascii=True` when the stream genuinely could not encode a character (`_dump_json`) — but **GBK can encode common Chinese, so that branch never fired**, leaving output that humans could read and machines could not. Reconfiguring the stream makes `_stream_encoding()` return `utf-8` and the two paths finally agree.
+
+Leaving terminals alone is deliberate: writing UTF-8 to a default `cmd.exe` code page garbles the screen, and that copy is the one a human reads.
 
 ### 7.6 `mcp_server.py` — MCP server
 
@@ -646,7 +654,7 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **24 files / 369 cases**, green in 1–3 minutes.
+`tests/` holds **24 files / 372 cases**, green in 1–3 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|

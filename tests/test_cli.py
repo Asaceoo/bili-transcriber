@@ -188,6 +188,56 @@ def test_cli_json_sanitizes_nan():
     assert json.loads(text)["duration"] is None
 
 
+def test_configure_output_encoding_forces_utf8_on_pipe():
+    """被管道/重定向(stdout 非 tty)时必须改写成 UTF-8。
+
+    打包版不继承 PYTHONUTF8,中文 Windows 下 stdout 是 cp936,JSON 里的中文
+    会按 GBK 写出,按 UTF-8 解析的 AI 客户端直接解码失败。
+    """
+    calls = []
+
+    class FakeStream:
+        encoding = "cp936"
+
+        def __init__(self, tty):
+            self._tty = tty
+
+        def isatty(self):
+            return self._tty
+
+        def reconfigure(self, **kw):
+            calls.append(kw)
+
+    out, err = FakeStream(False), FakeStream(False)
+    cli._configure_output_encoding([out, err])
+    assert calls == [{"encoding": "utf-8", "errors": "replace"}] * 2
+
+
+def test_configure_output_encoding_keeps_console_codepage():
+    """留在终端时不动:cmd.exe 默认代码页写 UTF-8 会花屏。"""
+    calls = []
+
+    class TtyStream:
+        def isatty(self):
+            return True
+
+        def reconfigure(self, **kw):
+            calls.append(kw)
+
+    cli._configure_output_encoding([TtyStream()])
+    assert calls == []
+
+
+def test_configure_output_encoding_tolerates_odd_streams():
+    """已关闭/被包装的流不能把 CLI 拖崩(reconfigure 可能抛 ValueError/AttributeError)。"""
+
+    class Broken:
+        def isatty(self):
+            raise ValueError("I/O operation on closed file")
+
+    cli._configure_output_encoding([Broken(), None])
+
+
 # ---------- 通道开关(设置页关闭 CLI 后必须直接拒绝) ----------
 
 def _write_settings(tmp_path, monkeypatch, **flags):

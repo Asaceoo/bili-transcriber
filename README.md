@@ -10,12 +10,12 @@
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
 [![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-369%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-372%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
 </div>
 
-> 本 README 对应 **v0.1.39** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
+> 本 README 对应 **v0.1.40** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
 
 ---
 
@@ -395,7 +395,7 @@ bili-transcriber.exe --version
 | `--mcp` | 以 MCP stdio 服务运行 |
 | `--version` | 显示版本 |
 
-> 输出编码自适应：打包窗口态下 stdout 是 GBK，遇到 emoji 会自动降级为 ASCII 转义，**不会因编码崩掉**，JSON 始终可解析。
+> 输出编码：**被管道/重定向接管时一律 UTF-8**（AI 客户端按 UTF-8 解析不会乱码），留在终端里则沿用控制台代码页，避免 `cmd.exe` 花屏。JSON 里的中文原样输出，不做 ASCII 转义。
 
 ---
 
@@ -519,7 +519,7 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 369 passed
+.venv\Scripts\pytest -q                    # 当前 372 passed
 .venv\Scripts\python -m app.main           # 开发运行
 ```
 

@@ -1,8 +1,8 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。讲清架构分层、并发模型、状态机、模块职责、数据契约、安全边界、打包坑位与测试体系。
-> 本手册对应 **v0.1.39** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
-> 带版本号的发布快照见 [technical-manual-zh-0.1.39.md](technical-manual-zh-0.1.39.md)。
+> 本手册对应 **v0.1.40** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
+> 带版本号的发布快照见 [technical-manual-zh-0.1.40.md](technical-manual-zh-0.1.40.md)。
 
 ---
 
@@ -153,7 +153,7 @@ bili-transcriber/
 │   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
 │   ├── e2e_check.py            # 端到端链路检查
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（24 文件 / 369 用例）
+├── tests/                      # pytest（24 文件 / 372 用例）
 ├── docs/                       # 双语手册 + assets/ 概念图
 ├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
 ├── output/                     # 转写产物（运行时）
@@ -391,6 +391,14 @@ def _dump_json(payload, indent=2):
 `--version` 不受门禁影响 —— 排查问题时至少还能拿到版本号。
 
 **断管不抛栈**。`cli ... | head -1` 会让 stdout 提前关闭，Python 默认抛 `BrokenPipeError`，退出码变 1，脚本误判成"任务失败"。`_write()` 捕获 `(BrokenPipeError, OSError, ValueError)` 后把 `sys.stdout` 指向 `devnull`，同时避免解释器退出时再 flush 一次报 `Exception ignored in: <_io.TextIOWrapper>`。
+
+**输出被管道接管时强制 UTF-8**。`main()` 的第一行是 `_configure_output_encoding()`：`stdout`/`stderr` 若不是 tty（被重定向或作为子进程管道），就 `reconfigure(encoding="utf-8", errors="replace")`；仍是终端则保持控制台代码页。
+
+为什么非改不可：打包版自带运行时，**不继承调用方的 `PYTHONUTF8` / `PYTHONIOENCODING`**，中文 Windows 下 stdout 编码取系统 ANSI 代码页 `cp936`。此时 JSON 里的中文按 GBK 写出 —— 本机 `subprocess.run(..., text=True)` 用 locale 解码能读，但按 UTF-8 解析的客户端（Node `child_process`、显式 `encoding="utf-8"` 的 Python 调用方）会得到乱码甚至 `UnicodeDecodeError`，而这正是 CLI 通道的主要使用者。
+
+早期实现只在"编码装不下"时降级 `ensure_ascii=True`（`_dump_json`），但 **GBK 装得下常用汉字，降级分支根本不会触发** —— 输出于是长期是"人能看、机器读错"的 GBK。改流之后 `_stream_encoding()` 返回 `utf-8`，两条路径终于一致。
+
+终端不动是有意的：`cmd.exe` 默认代码页直接写 UTF-8 会花屏，人读的那一份得顺着控制台。
 
 ### 7.6 `mcp_server.py` — MCP 服务端
 
@@ -645,7 +653,7 @@ python scripts/release.py --single-only# 仅重建单文件版
 
 ## 12. 测试体系
 
-`tests/` 共 **24 个文件 / 369 用例**，全绿约 1~3 分钟。
+`tests/` 共 **24 个文件 / 372 用例**，全绿约 1~3 分钟。
 
 | 领域 | 文件 | 策略 |
 |---|---|---|
