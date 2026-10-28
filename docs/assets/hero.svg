@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-label="bili-transcriber：B站音频本地转写">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B1120"/>
+      <stop offset="0.55" stop-color="#111C33"/>
+      <stop offset="1" stop-color="#1A2547"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FB7299"/>
+      <stop offset="1" stop-color="#4CC2FF"/>
+    </linearGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#E8EDF7" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#E8EDF7" stop-opacity="0.15"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#FFFFFF" stroke-opacity="0.045" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="340" rx="20" fill="url(#bg)"/>
+  <rect width="1200" height="340" rx="20" fill="url(#grid)"/>
+
+  <!-- 左侧标题 -->
+  <g font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="64" y="96" fill="#93A2BF" font-size="15" letter-spacing="3">BILIBILI · LOCAL · PRIVACY-FIRST</text>
+    <text x="62" y="162" fill="#FFFFFF" font-size="54" font-weight="700">bili-transcriber</text>
+    <text x="64" y="200" fill="#C8D4EA" font-size="19">B站音频本地转写 · 粘贴链接，出 SRT / TXT / Markdown</text>
+
+    <!-- chips -->
+    <g font-size="14">
+      <rect x="64" y="228" width="132" height="34" rx="17" fill="#FB7299" fill-opacity="0.14" stroke="#FB7299" stroke-opacity="0.5"/>
+      <text x="130" y="250" fill="#FFB3C7" text-anchor="middle">单P / 多P / 合集</text>
+
+      <rect x="208" y="228" width="196" height="34" rx="17" fill="#4CC2FF" fill-opacity="0.12" stroke="#4CC2FF" stroke-opacity="0.45"/>
+      <text x="306" y="250" fill="#A9E0FF" text-anchor="middle">Whisper · Qwen3 · SenseVoice</text>
+
+      <rect x="416" y="228" width="150" height="34" rx="17" fill="#35D07F" fill-opacity="0.12" stroke="#35D07F" stroke-opacity="0.45"/>
+      <text x="491" y="250" fill="#9DF0C4" text-anchor="middle">断点续跑 · 讲义</text>
+
+      <rect x="578" y="228" width="116" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.22"/>
+      <text x="636" y="250" fill="#D6DEEE" text-anchor="middle">CLI · MCP</text>
+    </g>
+  </g>
+
+  <!-- 右侧波形 + 字幕块 -->
+  <g transform="translate(760, 64)">
+    <g fill="url(#wave)">
+      <rect x="0"   y="64" width="8" height="36" rx="4"/>
+      <rect x="18"  y="48" width="8" height="68" rx="4"/>
+      <rect x="36"  y="28" width="8" height="108" rx="4"/>
+      <rect x="54"  y="52" width="8" height="60" rx="4"/>
+      <rect x="72"  y="16" width="8" height="132" rx="4"/>
+      <rect x="90"  y="40" width="8" height="84" rx="4"/>
+      <rect x="108" y="60" width="8" height="44" rx="4"/>
+      <rect x="126" y="24" width="8" height="116" rx="4"/>
+      <rect x="144" y="44" width="8" height="76" rx="4"/>
+      <rect x="162" y="8"  width="8" height="148" rx="4"/>
+      <rect x="180" y="36" width="8" height="92" rx="4"/>
+      <rect x="198" y="56" width="8" height="52" rx="4"/>
+      <rect x="216" y="30" width="8" height="104" rx="4"/>
+      <rect x="234" y="52" width="8" height="60" rx="4"/>
+      <rect x="252" y="68" width="8" height="28" rx="4"/>
+    </g>
+
+    <g font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+      <rect x="0" y="184" width="300" height="12" rx="6" fill="url(#fade)" opacity="0.85"/>
+      <rect x="0" y="208" width="236" height="12" rx="6" fill="url(#fade)" opacity="0.6"/>
+      <rect x="0" y="232" width="272" height="12" rx="6" fill="url(#fade)" opacity="0.45"/>
+      <text x="306" y="196" fill="#7E90B0" font-size="12">00:00</text>
+      <text x="306" y="244" fill="#7E90B0" font-size="12">12:30</text>
+    </g>
+  </g>
+
+  <!-- 底部装饰线 -->
+  <rect x="0" y="338" width="1200" height="2" fill="url(#wave)" opacity="0.55"/>
+</svg>

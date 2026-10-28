@@ -75,7 +75,8 @@ datas = (
 
 # ---------- 隐藏导入(动态加载的子模块) ----------
 hiddenimports = (
-    collect_submodules("nicegui")
+    collect_submodules("app")  # CLI/MCP 入口在函数内延迟导入,显式收集防漏打
+    + collect_submodules("nicegui")
     + collect_submodules("faster_whisper")
     + collect_submodules("ctranslate2")
     + collect_submodules("sherpa_onnx")

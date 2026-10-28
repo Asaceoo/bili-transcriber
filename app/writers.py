@@ -3,11 +3,40 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 from app.transcriber import Segment
+
+
+def _write_text_retry(path: Path, text: str, attempts: int = 6) -> Path:
+    """原子落盘:先写同目录临时文件再 os.replace,失败重试。
+
+    两件事必须在这里解决:
+    1) 进程被杀/断电时不能留下半截产物 —— pipeline 用"产物存在且 md 存在"
+       判断任务已完成,半截 .md 会被当成成功,用户再也拿不到完整稿;
+    2) Windows 杀软常在新文件上短暂持有句柄,直接 write_text 会 PermissionError,
+       表现为"转写跑完却保存失败",重试几十毫秒即可通过。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    last: Exception | None = None
+    for i in range(max(1, attempts)):
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+            return path
+        except PermissionError as exc:  # 目标被占用(杀软/索引器/编辑器)
+            last = exc
+            time.sleep(0.05 * (i + 1))
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    assert last is not None
+    raise last
 
 
 @dataclass
@@ -59,16 +88,12 @@ def write_srt(segments: Iterable[Segment], path: Path) -> Path:
         lines.append(f"{_fmt_ts_srt(seg.start)} --> {_fmt_ts_srt(seg.end)}")
         lines.append(seg.text)
         lines.append("")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    return _write_text_retry(path, "\n".join(lines))
 
 
 def write_txt(segments: Iterable[Segment], path: Path) -> Path:
     text = "\n".join(seg.text for seg in segments)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text + "\n", encoding="utf-8")
-    return path
+    return _write_text_retry(path, text + "\n")
 
 
 def write_md(meta: NoteMeta, segments: Iterable[Segment], path: Path) -> Path:
@@ -87,9 +112,7 @@ def write_md(meta: NoteMeta, segments: Iterable[Segment], path: Path) -> Path:
     for seg in segs:
         lines.append(f"**[{_fmt_ts_md(seg.start)}]** {seg.text}")
         lines.append("")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    return _write_text_retry(path, "\n".join(lines))
 
 
 def build_slide_sections(
@@ -152,6 +175,4 @@ def write_notes_md(meta: NoteMeta, sections: list[SlideSection], path: Path) -> 
                 lines.append("")
         else:
             lines += ["*(本页时段无字幕)*", ""]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    return path
+    return _write_text_retry(path, "\n".join(lines))

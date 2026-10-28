@@ -599,7 +599,9 @@ def test_start_recovers_paused_jobs_from_previous_session(env, monkeypatch):
     assert store.get_job("BVold").status == "queued"
     assert pipe.pending_count == 1
     item = pipe._queue.get_nowait()
-    assert item.kind == "url" and item.media_id == "BVold"
+    # 走 prepared 分支:按 Job 字段重建 MediaInfo,不再对 URL 二次 probe。
+    # (url 分支会重新展开整个链接,多P 任务会顺手把兄弟分P 再排一遍。)
+    assert item.kind == "prepared" and item.media_id == "BVold"
     pipe.shutdown()
 
 
@@ -765,3 +767,190 @@ def test_apply_settings_rebuilds_workers_when_idle(env):
     settings.workers = 1
     pipe.apply_settings(settings)  # 空闲 → 立即重建
     assert len([t for t in pipe._workers if t.is_alive()]) == 1
+
+
+def _wait_status(store, media_id, statuses=("done", "failed"), timeout=15.0):
+    import time as _t
+    deadline = _t.monotonic() + timeout
+    while _t.monotonic() < deadline:
+        job = store.get_job(media_id)
+        if job and job.status in statuses:
+            return job
+        _t.sleep(0.05)
+    raise AssertionError(f"任务未在 {timeout}s 内进入 {statuses}: "
+                         f"{getattr(store.get_job(media_id), 'status', None)}")
+
+
+def test_submit_prepared_runs_without_second_probe(env):
+    """CLI/MCP 预解析提交:直接入队,worker 不再重复 probe。"""
+    pipe, store, _settings, _events, _tmp = env
+    _fake_transcriber(pipe)
+    results = pipe.submit_prepared([INFO])
+    assert results == [{"media_id": "BV1pipe_p1", "title": "管道测试", "status": "queued"}]
+    job = _wait_status(store, "BV1pipe_p1")
+    assert job.status == "done"
+    assert pipe.downloader.probe_calls == 0  # 未二次解析
+
+
+def test_submit_prepared_skips_completed(env, tmp_path):
+    pipe, store, _settings, _events, _tmp = env
+    md = tmp_path / "done.md"
+    md.write_text("x", encoding="utf-8")
+    store.upsert_job(Job(media_id="BV1pipe_p1", bv="BV1pipe", title="管道测试",
+                         uploader="UP", duration=10.0, url="", status="done",
+                         md_path=str(md)))
+    results = pipe.submit_prepared([INFO])
+    assert results[0]["status"] == "skipped"
+    assert pipe._queue.unfinished_tasks == 0  # 未入队
+
+
+def test_process_prepared_falls_back_to_job_info(env):
+    """进程重启后 _prepared 丢失:按 Job 字段重建 MediaInfo 仍能跑通。"""
+    pipe, store, _settings, _events, _tmp = env
+    _fake_transcriber(pipe)
+    store.upsert_job(Job(media_id="BV1pipe_p1", bv="BV1pipe", title="管道测试",
+                         uploader="UP", duration=10.0,
+                         url="https://www.bilibili.com/video/BV1pipe", status="queued",
+                         part=1, total_parts=1))
+    pipe._prepared.clear()
+    pipe._process_prepared("BV1pipe_p1")
+    job = store.get_job("BV1pipe_p1")
+    assert job.status == "done"
+    assert job.md_path.endswith(".md")
+
+
+def test_submit_prepared_empty_list_no_start(env):
+    pipe, _store, _settings, _events, _tmp = env
+    assert pipe.submit_prepared([]) == []
+    assert pipe._workers == []
+
+
+def test_resubmit_after_cancel_runs(env):
+    """取消后再次提交同一视频必须真正执行(清掉遗留的取消控制位)。"""
+    pipe, store, _settings, _events, _tmp = env
+    _fake_transcriber(pipe)
+    store.upsert_job(Job(media_id="BV1pipe_p1", bv="BV1pipe", title="管道测试",
+                         uploader="UP", duration=10.0, url="", status="cancelled",
+                         error="已取消"))
+    pipe._control.cancel("BV1pipe_p1")
+    results = pipe.submit_prepared([INFO])
+    assert results[0]["status"] == "queued"
+    job = _wait_status(store, "BV1pipe_p1")
+    assert job.status == "done"
+
+
+def test_local_resubmit_after_cancel_runs(env, tmp_path):
+    pipe, store, _settings, _events, _tmp = env
+    _fake_transcriber(pipe)
+    media = tmp_path / "a.m4a"
+    media.write_bytes(b"fake")
+    mid = "local_" + Pipeline._local_hash(media)
+    store.upsert_job(Job(media_id=mid, bv="", title="a", uploader="本地文件",
+                         duration=1.0, url="", source_type="local", status="cancelled"))
+    pipe._control.cancel(mid)
+    pipe.submit_local(media)
+    job = _wait_status(store, mid)
+    assert job.status == "done"
+    pipe.shutdown()
+
+
+def test_pipeline_without_paused_recovery_keeps_jobs_paused(env):
+    """无界面进程(CLI/MCP)不得擅自恢复桌面端暂停的任务。"""
+    pipe, store, settings, _events, tmp = env
+    store.upsert_job(Job(media_id="pz", bv="", title="暂停", uploader="",
+                         duration=1.0, url="https://x", status="paused"))
+    quiet = Pipeline(downloader=pipe.downloader, store=store, settings=settings,
+                     base_dir=tmp, recover_paused=False)
+    quiet.start()
+    try:
+        assert store.get_job("pz").status == "paused"
+        assert quiet._queue.unfinished_tasks == 0
+    finally:
+        quiet.shutdown()
+
+
+def test_submit_prepared_does_not_requeue_active_job(env):
+    """运行中任务被重复提交时不得重置状态/二次入队(否则重复下载+转写)。"""
+    pipe, store, _settings, _events, _tmp = env
+    for stage in ("downloading", "transcribing", "saving", "paused"):
+        store.upsert_job(Job(media_id="BV1pipe_p1", bv="BV1pipe", title="管道测试",
+                             uploader="UP", duration=10.0, url="", status=stage,
+                             progress=0.3))
+        before = pipe._queue.unfinished_tasks
+        results = pipe.submit_prepared([INFO])
+        assert results[0]["status"] == "running"
+        assert results[0]["stage"] == stage
+        assert pipe._queue.unfinished_tasks == before
+        assert store.get_job("BV1pipe_p1").status == stage
+
+
+def test_submit_local_does_not_requeue_active_job(env, tmp_path):
+    pipe, store, _settings, _events, _tmp = env
+    media = tmp_path / "active.m4a"
+    media.write_bytes(b"fake")
+    mid = "local_" + Pipeline._local_hash(media)
+    store.upsert_job(Job(media_id=mid, bv="", title="active", uploader="本地文件",
+                         duration=1.0, url="", source_type="local", status="transcribing"))
+    pipe.submit_local(media)
+    assert store.get_job(mid).status == "transcribing"
+    assert pipe._queue.unfinished_tasks == 0
+
+
+def test_start_requeues_leftover_queued_jobs(env):
+    """上次会话遗留的"排队中"任务必须重新入队。
+
+    关闭应用 / 崩溃 / CLI --no-wait 都会留下没有内存队列项的 queued 行,
+    不重新入队就永远卡在"排队中",用户只能手动重跑。
+    """
+    pipe, store, _settings, _events, _tmp = env
+    _fake_transcriber(pipe)
+    store.upsert_job(Job(media_id="BV1left_p1", bv="BV1left", title="遗留", uploader="UP",
+                         duration=10.0, url="https://www.bilibili.com/video/BV1left",
+                         status="queued"))
+    pipe.start()
+    try:
+        job = _wait_status(store, "BV1left_p1", timeout=15)
+        assert job.status == "done"
+    finally:
+        pipe.shutdown()
+        for t in pipe._workers:
+            t.join(timeout=3)
+
+
+def test_headless_does_not_requeue_foreign_queued_jobs(env):
+    """后台进程(recover_paused=False)不得抢桌面端的排队任务。"""
+    pipe, store, settings, _events, tmp = env
+    store.upsert_job(Job(media_id="q2", bv="", title="别人的", uploader="",
+                         duration=1.0, url="https://x", status="queued"))
+    quiet = Pipeline(downloader=pipe.downloader, store=store, settings=settings,
+                     base_dir=tmp, recover_paused=False)
+    quiet.start()
+    try:
+        assert quiet._queue.unfinished_tasks == 0
+        assert store.get_job("q2").status == "queued"
+    finally:
+        quiet.shutdown()
+        for t in quiet._workers:
+            t.join(timeout=3)
+
+
+def test_start_recovers_job_killed_mid_transcribe(env):
+    """被强杀在"转写中"的任务也必须续跑。
+
+    真机复现:CLI --no-wait 退出后任务永久停在 transcribing,重启桌面端也不动,
+    因为恢复逻辑只认 queued/paused。任何"进行中"状态在新进程里都没有执行者。
+    """
+    pipe, store, _settings, _events, _tmp = env
+    _fake_transcriber(pipe)
+    store.upsert_job(Job(media_id="BV1mid_p1", bv="BV1mid", title="半路被杀", uploader="UP",
+                         duration=10.0, url="https://www.bilibili.com/video/BV1mid",
+                         status="transcribing", progress=0.6))
+    pipe.start()
+    try:
+        job = _wait_status(store, "BV1mid_p1", timeout=15)
+        assert job.status == "done"
+        assert job.md_path
+    finally:
+        pipe.shutdown()
+        for t in pipe._workers:
+            t.join(timeout=3)

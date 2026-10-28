@@ -14,16 +14,14 @@ from pathlib import Path
 
 from app.downloader import Downloader
 from app.logging_setup import log_file
-from app.pipeline import Pipeline
+from app.paths import base_dir, data_dir
+from app.pipeline import ACTIVE_STATUSES, Pipeline  # noqa: F401 — 再导出供 pages/helpers 使用
 from app.store import Store, load_settings
 
 logger = logging.getLogger(__name__)
 
-if getattr(sys, "frozen", False):
-    BASE_DIR = Path(sys.executable).parent
-else:
-    BASE_DIR = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = BASE_DIR / "data"
+BASE_DIR = base_dir()
+DATA_DIR = data_dir()
 # 应用图标资产的运行时定位:开发=app/assets;onedir=exe 旁 _internal/frozen;
 # onefile=解压缓存 sys._MEIPASS。取第一个存在的目录。
 _meipass = getattr(sys, "_MEIPASS", None)
@@ -41,7 +39,6 @@ STATUS_LABEL = {
     "done": "已完成", "failed": "失败",
     "paused": "已暂停", "cancelled": "已取消",
 }
-ACTIVE_STATUSES = {"queued", "downloading", "converting", "transcribing", "extracting", "saving", "paused"}
 MODEL_OPTIONS = ["large-v3-turbo", "large-v3", "medium", "small", "base", "tiny"]
 
 store = Store(DATA_DIR / "history.db")

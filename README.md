@@ -1,439 +1,554 @@
-# B站音频本地转写桌面工具 (bili-transcriber)
-<img width="3200" height="1929" alt="521118ebd34554bd" src="https://github.com/user-attachments/assets/6e8d0614-d772-4300-94d0-6ddf5020dfef" />
+<div align="center">
 
-[user-guide-zh-0.1.32.md](https://github.com/user-attachments/files/32939689/user-guide-zh-0.1.32.md)
+<img src="docs/assets/hero.svg" alt="bili-transcriber：B站音频本地转写" width="100%" />
 
-# B站音频本地转写工具 — 用户手册（中文）
+# bili-transcriber
 
-> 项目名：**bili-transcriber**
-> 一句话功能：粘贴视频链接（B站 / 抖音 / 小红书 / 快手 / YouTube），本地自动完成「下载 → 转码 → 本地 AI 转写 → 导出字幕」。
+**粘贴一个链接，拿回一份可用的文字稿。下载、转码、转写全在你自己的机器上完成。**
 
-本工具**完全本地运行**，音频与字幕不会上传任何服务器，适合对隐私敏感或需要离线批量处理的场景。
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
+[![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
+[![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
+[![Tests](https://img.shields.io/badge/tests-344%20passed-2ea44f)](tests)
+[![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
-> 发布版本快照 **v0.1.34** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
+</div>
 
----
-
-## 1. 功能简介
-
-- 支持 **单 P / 多 P / 合集** 链接，自动展开为多个转写任务。
-- **多平台**：B站、抖音、小红书、快手（免登录直链解析）、YouTube（需代理）。
-- **三识别引擎**（设置页切换）：
-  | 引擎 | 模型 | 特点 |
-  |------|------|------|
-  | Whisper（默认） | large-v3-turbo / large-v3 / medium / small / base / tiny | 准确率最高，支持 GPU 加速 |
-  | Qwen3-ASR | Qwen3-ASR-0.6B / 1.7B | 阿里通义千问，中文表现好 |
-  | SenseVoice | SenseVoiceSmall | 体积小、速度快，CPU 也能跑 |
-- 纯本地推理，数据不上传。
-- 断点续跑：失败重跑不重复下载 / 转码。
-- 图文讲义（可选）：自动截取 PPT 翻页关键帧，生成带截图的讲义 Markdown。
-- 系统托盘常驻：关窗后服务不退出，可随时重新打开窗口。
+> 本 README 对应 **v0.1.39** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
 
 ---
 
-## 2. 环境要求
+## 目录
+
+| 章节 | 你会得到什么 |
+|---|---|
+| [一句话的旅程](#一句话的旅程) | 从链接到字幕，中间到底发生了什么 |
+| [功能一览](#功能一览) | 支持哪些平台、引擎、输出 |
+| [安装](#安装) | 四种形态，任选其一 |
+| [快速开始](#快速开始) | 三分钟跑通第一个任务 |
+| [使用说明](#使用说明) | 三个页签逐页讲清 |
+| [20 个使用实例](#20-个使用实例) | 直接抄走的真实场景 |
+| [命令行参考](#命令行参考) | 26 个参数全表 |
+| [AI 集成（CLI / MCP）](#ai-集成cli--mcp) | 让 WorkBuddy 等直接调用 |
+| [输出结构](#输出结构) | 产物长什么样 |
+| [常见问题](#常见问题) | 10 个高频坑 |
+| [数据与隐私](#数据与隐私) | 什么会联网、什么不会 |
+| [开发与测试](#开发与测试) | 源码运行、跑测试、打包 |
+| [文档](#文档) | 手册索引、架构与模块职责入口 |
+
+---
+
+## 一句话的旅程
+
+<img src="docs/assets/pipeline.svg" alt="处理流程：链接或文件到 SRT/TXT/Markdown" width="100%" />
+
+一条链接进来，经过五道工序：
+
+1. **探测** — 认出是哪个平台，把短链展开，把「合集」「多 P」拆成一条条独立任务。
+2. **下载** — 只取最佳音轨（开启图文讲义时改取视频流），落到本地缓存。
+3. **转码** — FFmpeg 统一成 16 kHz 单声道 WAV，这是所有引擎都吃得下的格式。
+4. **转写** — 本地模型推理，GPU 优先、失败自动回退 CPU。
+5. **落盘** — SRT / TXT / Markdown 三件套，可选的图文讲义 Markdown。
+
+任何一步失败，重跑会**复用已完成的缓存**，不会从头再来。
+
+---
+
+## 功能一览
+
+### 支持平台
+
+| 平台 | 免登录 | 备注 |
+|---|:---:|---|
+| B 站 | ✅ | 单 P / 多 P / 合集自动展开；支持 Cookie 拿高码率 |
+| 抖音 | ⚠️ | 精选内容需配浏览器 Cookie |
+| 小红书 | ⚠️ | 同上 |
+| 快手 | ✅ | 自研 SSR 解析，不走 yt-dlp |
+| YouTube | ⚠️ | 需网络代理；部分视频需 Cookie |
+| 本地文件 | ✅ | 14 种音视频格式直接转写 |
+
+### 三个识别引擎
+
+| 引擎 | 模型 | 适合谁 |
+|---|---|---|
+| **Whisper**（默认） | `large-v3-turbo` / `large-v3` / `medium` / `small` / `base` / `tiny` | 准确率优先，支持 CUDA 加速 |
+| **Qwen3-ASR** | `Qwen3-ASR-0.6B` / `1.7B` | 中文口语、方言口音表现好 |
+| **SenseVoice** | `SenseVoiceSmall` | 体积小、速度快，CPU 也跑得动 |
+
+三个引擎共享同一套流程与输出格式，设置页切换即生效，不需要改代码。
+
+### 其他
+
+- **断点续跑** — 失败重跑跳过已完成的下载 / 转码。
+- **图文讲义** — 自动识别 PPT 翻页画面，生成「时间戳 + 截图 + 该页字幕」的讲义。
+- **系统托盘** — 关窗不退出，任务继续跑。
+- **单实例保护** — 重复启动只会把已有窗口调出来，不会抢同一个任务。
+- **纯本地** — 转写过程不调用任何外部 AI API。
+
+---
+
+## 安装
+
+### 系统要求
 
 | 项目 | 要求 |
-|------|------|
-| 操作系统 | Windows 10/11（已验证） |
-| GPU（可选） | NVIDIA 显卡 + CUDA 12.x；无 GPU 自动回退 CPU，仅速度更慢 |
-| FFmpeg | **无需安装**：内置随包静态版 |
-| 网络 | 首次使用需联网下载模型（走国内镜像）；之后完全离线可用 |
+|---|---|
+| 操作系统 | Windows 10 / 11（已验证）；macOS / Linux 未验证 |
+| Python（源码模式） | ≥ 3.11 |
+| GPU（可选） | NVIDIA + CUDA 12.x；无卡自动回退 CPU |
+| FFmpeg | **不用装**，随包内置静态版 |
+| 磁盘 | 程序约 700 MB，Whisper 模型 1.6 GB，GPU 包 1.3 GB |
 
-> 若没有 NVIDIA 显卡，程序会自动回退 CPU 推理，无需任何配置。
+### 四种形态
+
+| 形态 | 文件 | 适合 |
+|---|---|---|
+| 安装版 | `bili-transcriber-setup-{ver}.exe` | 普通用户，向导安装，建快捷方式 |
+| 便携包 | `bili-transcriber-portable-{ver}.zip` | 解压即用，不写注册表，可放 U 盘 |
+| 单文件版 | `bili-transcriber-single-{ver}.exe` | 临时用一次；CPU 模式，首启解压较慢 |
+| 源码 | `pip install -e .` | 开发、调试、二次开发 |
+
+### GPU 加速包（可选）
+
+安装版与便携包默认 CPU 推理。要让 Whisper 走 NVIDIA 显卡：
+
+1. 下载 `bili-transcriber-gpu-{ver}.zip`（约 1.3 GB，含 17 个 CUDA DLL）。
+2. 解压到 `%LOCALAPPDATA%\Bili Note\gpu\`，**保留 zip 内的 `nvidia/<包>/bin/` 结构**（程序按这个结构找 DLL，压平会找不到）。
+3. 重启应用 —— 程序自动注册 DLL 目录，无需配环境变量。
+
+> 没装 GPU 包也不会报错：程序静默回退 CPU，只是慢一些。
 
 ---
 
-## 3. 安装（三种方式任选其一）
+## 快速开始
 
-### 方式一：安装版（推荐普通用户）
-双击 `bili-transcriber-setup-0.1.34.exe`，按向导完成安装。桌面/开始菜单生成快捷方式。
-
-### 方式二：便携包
-解压 `bili-transcriber-portable-0.1.34.zip` 到任意目录，双击其中的 `bili-transcriber.exe` 即可。**不写注册表**，适合 U 盘携带或多机使用。
-
-### 方式三：单文件版
-直接运行 `bili-transcriber-single-0.1.34.exe`（CPU 模式）。首次启动需解压，稍慢；追求 GPU 提速请用前两种。
-
-### 方式四：开发模式（源码运行）
 ```powershell
+# 1. 装（源码模式）
 python -m venv .venv
 .venv\Scripts\pip install -e .
+
+# 2. 跑
+.venv\Scripts\python -m app.main
+
+# 3. 浏览器自动打开 http://127.0.0.1:8765
+```
+
+在输入框粘贴 `https://www.bilibili.com/video/BV1xxxxxxxxx`，点「添加」。
+
+第一次跑会下载模型（约 1.6 GB，走国内镜像），之后完全离线。10 分钟的视频在 RTX 3060 上大约 40 秒出字幕。
+
+---
+
+## 使用说明
+
+界面三个页签：**任务 / 历史 / 设置**。
+
+### 任务（Tasks）
+
+1. 输入框粘贴链接 → 点「添加」。
+2. 系统自动探测，把单 P / 多 P / 合集展开成多条任务。
+3. 状态依次推进：`queued → downloading → converting → transcribing → saving → done`（开讲义会多一段 `extracting`）。
+4. 每行可单独操作：**打开所在文件夹** / **重新运行** / **取消**。
+
+**转写本地文件有两个入口：**
+
+- **选择文件（推荐）** — 弹系统原生文件框，直接引用原路径，零拷贝秒提交，大文件首选。
+- **浏览器上传** — 手机或另一台电脑访问本机网页时才用；走 base64 传输，大文件明显慢。副本存在 `uploads/`，不会自动删除。
+
+支持格式：`mp4 mkv mov avi webm flv wmv mp3 m4a wav ogg opus flac aac`。
+
+### 历史（History）
+
+已完成任务的索引，存在本地 SQLite（`data/history.db`）。可按状态 / 关键字筛选，每行可打开文件夹或重跑。
+
+清空历史不会删产物文件，只删索引。
+
+### 设置（Settings）
+
+全部存在 `data/settings.json`，有「恢复默认」一键还原。
+
+| 设置 | 可选值 | 说明 |
+|---|---|---|
+| 识别引擎 | whisper / qwen3-asr / sensevoice | 切换后模型列表自动跟随 |
+| 转写模型 | 按引擎而定 | whisper 默认 `large-v3-turbo` |
+| 设备 | auto / cuda / cpu | 有 N 卡选 `auto` |
+| 计算精度 | auto / float16 / int8_float16 / int8 | 显存不足改 `int8` |
+| 语言 | 空 = 自动 / zh / en | 中文视频指定 `zh` 更快更准 |
+| 保留音频 | 开 / 关 | 是否保留原始音频文件 |
+| VAD | 开 / 关 | 纯音乐场景会自动关闭重试 |
+| 图文讲义 | 开 / 关 | B 站任务改下视频流，体积明显变大 |
+| 模型目录 | 路径 | 默认 `%LOCALAPPDATA%\Bili Note\models` |
+| 浏览器 Cookie | 不使用 / Chrome / Edge / Firefox / Brave / Opera / Vivaldi | 抖音精选、部分 YouTube 需要 |
+| cookies.txt | 文件路径 | **优先于**浏览器 Cookie |
+| 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要 |
+| 输出目录 | 路径 | 默认 `output/` |
+| 并发数 | 整数 | 下载/转码并发，转写始终串行 |
+
+> 设置页保存前会校验：引擎 / 设备白名单，输出目录实际可创建可写。填错直接拒绝并提示原因。
+
+---
+
+## 20 个使用实例
+
+### 入门三例
+
+**1. 单个视频转字幕（最常用）**
+
+```
+粘贴 https://www.bilibili.com/video/BV1xx411c7mD → 添加
+→ output/BV1xx411c7mD_标题/标题.srt
+```
+
+**2. 一次搞定整个系列（多 P / 合集）**
+
+```
+粘贴带 ?p=1 的分 P 链接或合集链接 → 添加
+→ 自动展开为 N 条任务，逐条转写
+→ 同一合集的分 P 共享一个输出目录，文件名带 _P01 / _P02 后缀区分
+```
+
+中途某 P 失败不影响其他，重跑只补失败那条。
+
+**3. 把手机录的语音备忘转成文字**
+
+```
+任务页 → 选择文件(推荐) → 选中 D:\录音\会议.m4a
+→ output/本地_会议/会议.txt
+```
+
+---
+
+### 日常四例
+
+**4. 给视频加双语字幕（先出中文稿，再人工翻）**
+
+设置 `语言 = zh`、`计算精度 = int8_float16` → 转写 → 拿到 `.srt` → 导入 Aegisub / Subtitle Edit 翻译 → 导出双语。
+
+**5. 只想读文字，不要时间戳**
+
+```powershell
+bili-transcriber-cli "https://www.bilibili.com/video/BV1xx411c7mD" --json
+# 然后直接读 txt 产物，或：
+bili-transcriber-cli --result BV1xx411c7mD_p1 --format txt
+```
+
+**6. 提取某段话的位置（做笔记要贴时间点）**
+
+打开 `.md` 产物，每段前面就是 `[hh:mm:ss]` 时间戳，复制即可。需要精确到秒时用 `.srt`。
+
+**7. 批量转写一个文件夹里的所有录音**
+
+```powershell
+Get-ChildItem D:\录音\*.m4a | ForEach-Object {
+    .venv\Scripts\bili-transcriber-cli $_.FullName --json --timeout 3600
+}
+```
+
+---
+
+### 进阶五例
+
+**8. 提取课程 PPT 讲义（图文讲义）**
+
+设置页开「图文讲义」→ 转写 → 得到 `标题.notes.md` + `标题_frames/slide_*.jpg`。
+
+每页 = 可点击时间戳 + 关键帧截图 + 该画面期间的字幕。适合技术分享、公开课。
+
+**9. 显存不够，降精度接着跑**
+
+报 `CUDA out of memory` → 计算精度改 `int8`（占用减半）→ 重跑，**缓存命中不会重新下载**。
+
+**10. 换更快的模型做粗剪**
+
+设置 `模型 = small` + `设备 = cuda` → 转写速度提升数倍，准确率略降。适合先粗看内容再决定要不要精修。
+
+**11. 中文口语 / 方言重的访谈**
+
+设置 `引擎 = qwen3-asr`、`模型 = Qwen3-ASR-1.7B`。中文口语和口音场景通常比 Whisper 更稳。
+
+> 1.7B 在 CPU 上约为 0.6B 的 3 倍耗时，程序会主动提示。有 GPU 时快得多。
+
+**12. 纯老 CPU 机器也能跑**
+
+设置 `引擎 = sensevoice`、`设备 = cpu`。模型只有几百 MB，速度可接受。
+
+---
+
+### 平台三例
+
+**13. 抖音精选视频下不下来**
+
+设置页配「浏览器 Cookie = Chrome」（先在该浏览器登录抖音）→ 重试。如果仍失败，改用导出 `cookies.txt` 填路径（优先级更高）。
+
+**14. YouTube 视频要代理**
+
+设置「网络代理 = `http://127.0.0.1:7890`」→ 重试。代理变更后程序会清空网络探测缓存重新测。
+
+**15. 快手链接直接丢进来**
+
+`https://v.kuaishou.com/xxxxx` 分享链免登录解析，走自研 SSR 通道，不需要 Cookie。
+
+---
+
+### AI 集成三例
+
+**16. 让 AI 助手直接转写（MCP）**
+
+```jsonc
+// 客户端配置
+{"mcpServers": {"bili-transcriber": {
+  "command": "C:\\Program Files\\Bili Note\\bili-transcriber.exe",
+  "args": ["--mcp"]}}}
+```
+
+然后在对话里说「把这个链接转成文字稿」，AI 自己调 `transcribe` → `wait_jobs` → `get_transcript`。
+
+**17. 脚本里等任务跑完再取结果**
+
+```powershell
+bili-transcriber-cli "https://www.bilibili.com/video/BV1xx411c7mD" --json --timeout 1800
+# 退出码 0 = 全部成功；返回体里含 state / jobs / outputs
+```
+
+**18. 只提交不等待，回头再收**
+
+```powershell
+bili-transcriber-cli "https://..." --no-wait      # 提交即返回
+bili-transcriber-cli --list --status-filter done  # 稍后查
+bili-transcriber-cli --result BV1xx411c7mD_p1 --format srt
+```
+
+> `--no-wait` 提交的任务留在队列里；**下次启动桌面端会自动续跑**，不会变成僵尸任务。
+
+---
+
+### 排障两例
+
+**19. 任务卡住不动，看日志**
+
+任务页下方「运行日志」实时滚动，能看到当前阶段和真实报错。想看更细的，读 `%LOCALAPPDATA%\Bili Note\logs\app.log`（2 MB 轮转，保留 3 份）。
+
+**20. 端口被占用起不来**
+
+```powershell
+$env:BILI_PORT = "9000"
 .venv\Scripts\python -m app.main
 ```
 
-### GPU 加速包（可选）
-安装版 / 便携包默认为 CPU 推理。要让 Whisper 走 NVIDIA 显卡：
-
-1. 下载 `bili-transcriber-gpu-0.1.34.zip`（约 1.3 GB，内含 CUDA 运行库）。
-2. 解压到 `%LOCALAPPDATA%\Bili Note\gpu\` 目录。
-3. 重启应用——程序**自动检测并注册** CUDA 库，无需配置环境变量。
+或者：程序已经检测到单实例在跑 —— 它会直接把现有窗口打开然后退出，这是正常行为。
 
 ---
 
-## 4. 启动应用
+## 命令行参考
 
-- 双击快捷方式或 exe；开发模式用 `.venv\Scripts\python -m app.main`。
-- 默认以**浏览器模式**启动并自动打开 `http://127.0.0.1:8765`（100% 兼容，不依赖 WebView2）。
-- 关闭窗口后程序**退到系统托盘**继续运行：托盘图标右键可「打开主窗口」或「退出」。
-- 端口被占用时：设环境变量 `BILI_PORT=9000` 换端口。
-- 想要原生窗口（需已安装 WebView2）：设环境变量 `BILI_FORCE_NATIVE=1`。
-
----
-
-## 5. 使用流程
-
-### 任务（Tasks）
-1. 在输入框粘贴视频链接（B站 / 抖音 / 小红书 / 快手 / YouTube 均可）。
-2. 点击「添加」入队。系统自动探测并展开为若干条目。
-3. 状态机推进：`queued → downloading → converting → transcribing → extracting(可选) → saving → done / failed`。
-4. 任务列表实时刷新，**每行可单独**：打开所在文件夹、重新运行失败项、取消任务。
-
-### 转写本地文件（两种入口）
-- **选择文件（推荐）**：点「选择文件(推荐,立即转写)…」弹出**系统原生文件框**，直接引用原路径，零拷贝秒提交，大文件首选。
-- **浏览器上传**：仅在用手机/其他电脑访问本机网页时使用；走 base64 传输，大文件明显偏慢属正常。上传副本保存在 `uploads/`，不会被自动删除。
-
-支持格式：mp4 / mkv / mov / avi / webm / flv / wmv / mp3 / m4a / wav / ogg / opus / flac / aac。
-
-### 历史（History）
-- 已处理任务及产出路径索引（本地 SQLite 存储）。
-- 每行可打开所在文件夹 / 重新运行。
-
-### 设置（Settings）
-所有设置保存在本地 `data/settings.json`，提供「恢复默认」一键还原。详见下节。
-
----
-
-## 6. 设置项详解
-
-| 设置 | 可选值 | 说明 |
-|------|--------|------|
-| 识别引擎 | whisper / qwen3-asr / sensevoice | 切换后模型列表自动跟随 |
-| 转写模型 | 按引擎而定（见第 1 节表格） | whisper 默认 `large-v3-turbo` |
-| 设备 | auto / cuda / cpu | 有 N 卡选 auto 即可 |
-| 计算精度 | auto / float16 / int8_float16 / int8 | 显存不足改 int8（占用减半） |
-| 语言 | 空=自动检测 / zh / en | 中文视频指定 zh 提速降错 |
-| 保留音频 | 开/关 | 是否保留下载的原始音频 |
-| VAD 语音检测 | 开/关 | 默认开启；纯音乐场景自动关闭重试 |
-| 图文讲义 | 开/关 | 开启后 B站任务改下视频流（体积大），截 PPT 翻页帧生成讲义 |
-| 模型目录 | 路径 | 默认 `%LOCALAPPDATA%\Bili Note\models`；可放手动下载的模型包，设置页一键检测完整性 |
-| 浏览器 Cookie | 不使用 / Chrome / Edge / Firefox / Brave / Opera / Vivaldi | 抖音精选、部分 YouTube 视频需要 |
-| cookies.txt 路径 | 文件路径 | Netscape 格式，**优先于**浏览器 Cookie |
-| 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要 |
-| 输出目录 | 路径 | 默认 `output/` |
-
----
-
-## 7. 输出文件格式
-
-每个视频在输出目录下生成一个子文件夹：
+安装后在 `Scripts\` 下得到 `bili-transcriber-cli`（源码模式）。打包版没有独立可执行文件，改用分发前缀：
 
 ```
-output/{平台ID}_{标题}/
-├── {标题}.srt              # 带时间戳字幕（可直接导入剪辑软件）
+bili-transcriber.exe --cli <同样参数>
+bili-transcriber.exe --mcp          # MCP stdio 服务
+bili-transcriber.exe --version
+```
+
+`--cli` / `--mcp` 在进入 GUI 之前就被拦下分发，不会启动窗口。
+
+### 提交任务
+
+| 参数 | 说明 |
+|---|---|
+| `source` | 视频链接或本地音视频路径（位置参数） |
+| `--no-wait` | 只提交不等待，任务留在队列 |
+| `--timeout` | 等待上限秒数，默认 600 |
+| `--output-dir` | 覆盖输出目录 |
+| `--engine` | `whisper` / `qwen3-asr` / `sensevoice` |
+| `--model` | Whisper 模型名，如 `large-v3-turbo` |
+| `--device` | `auto` / `cuda` / `cpu` |
+| `--compute-type` | `auto` / `float16` / `int8_float16` / `int8` |
+| `--language` | `zh` / `en` / 省略=自动 |
+| `--notes` / `--no-notes` | 本次是否生成图文讲义 |
+| `--json` | 输出机器可读 JSON |
+
+### 查询与管理
+
+| 参数 | 说明 |
+|---|---|
+| `--list` | 列出任务 |
+| `--limit` | 返回条数，默认 20 |
+| `--status-filter` | 按状态过滤；支持 `running` 别名（queued/downloading/transcribing…） |
+| `--search` | 关键字过滤标题 |
+| `--status MEDIA_ID` | 查单个任务 |
+| `--result MEDIA_ID` | 读取产物文本 |
+| `--format` | `md` / `txt` / `srt` / `notes` |
+| `--max-chars` | 产物截断长度，默认 12000 |
+| `--cancel MEDIA_ID` | 取消任务 |
+
+### 设置与其他
+
+| 参数 | 说明 |
+|---|---|
+| `--settings` | 打印当前设置 |
+| `--set KEY=VALUE` | 改设置，可重复；非法值直接拒绝 |
+| `--prewarm` | 预加载模型并**等到就绪**才退出（退出码反映是否加载成功） |
+| `--mcp` | 以 MCP stdio 服务运行 |
+| `--version` | 显示版本 |
+
+> 输出编码自适应：打包窗口态下 stdout 是 GBK，遇到 emoji 会自动降级为 ASCII 转义，**不会因编码崩掉**，JSON 始终可解析。
+
+---
+
+## AI 集成（CLI / MCP）
+
+<img src="docs/assets/ai-integration.svg" alt="AI 集成：CLI 与 MCP 两条通道共用同一套服务层" width="100%" />
+
+两条通道共用同一个服务层（`app/headless.py`），行为完全一致 —— 只是传输方式不同：
+
+- **CLI** — 脚本、批处理、CI 里调用，参数进 / JSON 出。
+- **MCP** — AI 客户端（WorkBuddy、DeepSeek-Honey、Claude Code 等）通过 stdio 直接调工具。
+
+### MCP 的 9 个工具
+
+| 工具 | 作用 |
+|---|---|
+| `transcribe` | 提交转写任务（可设 `wait=true` 直接等结果） |
+| `wait_jobs` | 等待指定任务到终态 |
+| `job_status` | 查单个任务状态 |
+| `list_jobs` | 列出任务（支持 `running` 别名与关键字） |
+| `get_transcript` | 取产物文本（可指定格式与截断长度） |
+| `cancel_job` | 取消任务 |
+| `prewarm_model` | 预加载模型（`wait=true` 时阻塞到就绪） |
+| `get_settings` | 读当前设置 |
+| `update_settings` | 改设置（白名单校验 + 输出目录写探针） |
+
+细节见 [`docs/ai-integration.md`](docs/ai-integration.md)。
+
+---
+
+## 输出结构
+
+```
+{输出目录}/{平台ID}_{标题}/
+├── {标题}.srt              # 带时间戳字幕，可直接导入剪辑软件
 ├── {标题}.txt              # 纯文本稿
 ├── {标题}.md               # 带时间戳的 Markdown
-├── {标题}.m4a              # 原始音频（设置中可关闭保留）
-├── {标题}.notes.md         # 图文讲义（开启 notes 后生成）
-└── {标题}_frames/slide_*.jpg  # 讲义关键帧截图（移动时需与 notes.md 一起）
+├── {标题}.m4a              # 原始音频（设置可关）
+├── {标题}.notes.md         # 图文讲义（开启后生成）
+└── {标题}_frames/slide_*.jpg  # 讲义关键帧（移动时需与 notes.md 一起）
 ```
 
-### 图文讲义说明
-- 每页 = 可点击时间戳标题 + 关键帧截图 + 该画面期间的字幕。
-- 本地上传 / 快手任务直接用原视频抽帧；B站任务开启讲义后改为下载视频流（音频从视频抽取，不重复下载）。
-- 讲义生成失败**不影响**转写结果；纯音频文件自动跳过讲义。
+落盘是原子写（先写 `.tmp` 再 `os.replace`），带权限冲突重试 —— 不会留下半截文件。
 
 ---
 
-## 8. 常见问题（FAQ）
+## 常见问题
 
-**Q1：下载 / 解析失败？**
-B站/抖音接口偶有变动，优先升级下载器：`.venv\Scripts\pip install -U yt-dlp`（开发模式）。
+**Q1 下载 / 解析失败？**
+平台接口常变，先升级下载器：`pip install -U yt-dlp`。
 
-**Q2：抖音 / YouTube 提示需要登录或访问受限？**
-设置页配置**浏览器 Cookie**（先用对应浏览器登录目标网站），或导出 `cookies.txt` 填入路径；YouTube 另需配置**网络代理**。
+**Q2 抖音 / YouTube 提示需要登录？**
+配「浏览器 Cookie」（先在对应浏览器登录），或导出 `cookies.txt` 填路径。YouTube 另需代理。
 
-**Q3：转写很慢？**
-- 确认设备为 `auto`/`cuda` 并安装了 **GPU 加速包**（见第 3 节）。
-- 首次运行需下载模型（whisper large-v3-turbo 约 1.6 GB），之后不再下载。
-- Qwen3-ASR-1.7B 在 CPU 上约为 0.6B 的 3 倍耗时，程序会主动提示。
+**Q3 转写很慢？**
+确认设备 `auto`/`cuda` 且装了 GPU 包；首次要下 1.6 GB 模型；Qwen 1.7B 在 CPU 上是 0.6B 的 3 倍耗时。
 
-**Q4：显存不足（CUDA out of memory）？**
-计算精度改 `int8`，或换更小模型（如 `medium` / Qwen3-ASR-0.6B）。
+**Q4 CUDA out of memory？**
+精度改 `int8`，或换小模型（`medium` / `Qwen3-ASR-0.6B`）。
 
-**Q5：唱歌 / 纯音乐视频没有字幕？**
-VAD 只识别人声。程序遇此类内容会**自动关闭 VAD 重试**；若仍为空，多半是视频本身无人声。
+**Q5 唱歌 / 纯音乐没有字幕？**
+VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实没人声。
 
-**Q6：设置页「检测模型」提示缺失文件？**
-模型包不完整。删除该模型目录后让程序重新下载，或从设置页提示的官方地址重新获取。
+**Q6 「检测模型」提示缺失文件？**
+模型包不完整，删掉该目录让程序重新下载。
 
-**Q7：端口被占用？**
-`BILI_PORT=9000` 换端口启动。
+**Q7 端口被占用？**
+`BILI_PORT=9000` 换端口。若提示「已有实例在运行」，那是单实例保护，不是故障。
 
-**Q8：关了窗口任务还在跑吗？**
-在。程序退到系统托盘继续转写，从托盘可重新打开窗口。
+**Q8 关了窗口任务还在跑吗？**
+在。程序退到托盘继续转写，托盘图标可重新打开窗口。
 
----
+**Q9 能同时跑多个任务吗？**
+能。下载 / 转码并发（默认 2 路），**转写串行** —— 避免多个任务抢同一块显存导致 OOM。
 
-## 9. 故障排查
-
-- **运行日记**：任务页下方实时滚动，报错原因与阶段一目了然。
-- **模型下载慢 / 失败**：默认走 `hf-mirror.com` 国内镜像；需官方源时设 `HF_ENDPOINT=https://huggingface.co`。
-- **SSL 证书报错**：程序启动时已内置环境自愈，一般无需处理。
-- **GPU 包未生效**：确认解压路径为 `%LOCALAPPDATA%\Bili Note\gpu\`（其下直接是 cudnn/cublas 等 DLL），重启应用。
+**Q10 重跑会重新下载吗？**
+不会。音频与 WAV 缓存命中即跳过，除非手动删了中间产物。
 
 ---
 
-## 10. 隐私说明
+## 数据与隐私
 
-所有下载、转码、转写均在本地完成，不依赖任何外部 AI API。仅两类网络访问：① 首次模型下载（镜像站）；② 视频本身来自公开平台。字幕内容不会离开你的机器。
+**全程本地**：下载、转码、转写都不调用外部 AI API，字幕内容不离开你的机器。
+
+只有两类网络访问：
+
+1. **首次模型下载** — 走 `hf-mirror.com` 国内镜像（需官方源设 `HF_ENDPOINT=https://huggingface.co`）。
+2. **视频本身** — 从公开平台获取，和你用浏览器看视频是同一件事。
+
+本地存储位置：
+
+| 内容 | 路径 |
+|---|---|
+| 设置 | `data/settings.json` |
+| 历史索引 | `data/history.db`（SQLite） |
+| 日志 | `%LOCALAPPDATA%\Bili Note\logs\app.log`（轮转） |
+| 模型 | `%LOCALAPPDATA%\Bili Note\models` |
+| 产物 | 设置里的输出目录 |
 
 ---
 
-*更多技术细节见 [技术手册（中文# bili-transcriber 技术手册（中文）
+## 开发与测试
 
-> 面向开发者与维护者。说明架构、模块职责、并发模型、数据流、安全机制、构建发布流程与测试体系。
-> 发布版本快照 **v0.1.34** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
-
-## 1. 系统概览
-
-bili-transcriber 是一个**纯本地的多平台视频/音频转写桌面工具**。核心链路：
-
-```
-链接(B站/抖音/小红书/快手/YouTube)
-  → yt-dlp / 平台专用解析 下载最佳音频流（或视频流）
-  → FFmpeg 转码 16kHz 单声道 WAV
-  → 本地推理引擎（faster-whisper / Qwen3-ASR / SenseVoice 三选一）
-  → 输出 SRT / TXT / Markdown（可选图文讲义 notes.md）
-```
-
-设计原则：数据不上传、断点续跑、GPU 资源锁保护、UI 与计算线程解耦。
-
-## 2. 技术栈
-
-| 层 | 选型 |
-|----|------|
-| 语言 | Python ≥ 3.11（开发环境 3.14） |
-| 下载 | yt-dlp（B站/抖音/小红书/YouTube）+ 自研快手 SSR 解析 |
-| 转码 | FFmpeg（subprocess；内置 imageio-ffmpeg 静态版，`app/ffmpeg_bin.py` 解析） |
-| 推理引擎 1 | faster-whisper + ctranslate2（CUDA 后端，默认） |
-| 推理引擎 2 | qwen-asr（Qwen3-ASR 0.6B/1.7B，torch 后端） |
-| 推理引擎 3 | sherpa-onnx（SenseVoiceSmall，ONNX int8） |
-| 关键帧 | FFmpeg scene 检测（优先）/ PyAV 逐帧 MAD（回退），双后端 |
-| UI | NiceGUI（Quasar 组件），默认浏览器模式；pywebview 原生窗口可选 |
-| 托盘 | pystray（系统托盘常驻） |
-| 原生对话框 | ctypes comdlg32（Windows 文件选择框） |
-| 存储 | SQLite（history.db 历史索引）+ JSON（settings.json 设置） |
-| 构建 | hatchling（wheel）+ PyInstaller（onedir/onefile）+ InnoSetup（安装包） |
-
-## 3. 目录结构
-
-```
-bili-transcriber/
-├── app/                        # 应用源码（20 模块）
-│   ├── main.py                 # NiceGUI 三页签 UI + 事件绑定 + 启动模式选择
-│   ├── pipeline.py             # 核心编排：状态机 + WORKERS=2 线程池 + 引擎锁
-│   ├── downloader.py           # 下载编排：平台识别/短链/SSR/Cookie/代理/DNS防护
-│   ├── kuaishou.py             # 快手分享页 SSR 解析（免登录提取 mp4 直链）
-│   ├── transcriber.py          # 引擎1：faster-whisper 封装
-│   ├── qwen_transcriber.py     # 引擎2：Qwen3-ASR 封装（分块转写+对齐器）
-│   ├── sensevoice_transcriber.py # 引擎3：SenseVoice 封装（token→段时间戳）
-│   ├── converter.py            # FFmpeg 转码 16kHz 单声道 WAV
-│   ├── keyframes.py            # 关键帧提取（ffmpeg scene / PyAV 双后端）
-│   ├── writers.py              # SRT/TXT/MD/notes.md 落盘
-│   ├── models.py               # 模型目录扫描/检测/定位（三引擎）
-│   ├── gpu_runtime.py          # 外置 GPU 加速包 DLL 注册
-│   ├── ffmpeg_bin.py           # ffmpeg 二进制解析（PATH 优先，内置兜底）
-│   ├── hardware.py             # 硬件探测（GPU 型号/显存/CUDA 可用性）
-│   ├── store.py                # SQLite + JSON 设置（含 14 项设置定义）
-│   ├── task_control.py         # 任务级 暂停/取消 控制（线程安全）
-│   ├── native_dialog.py        # Windows 原生文件选择框（ctypes comdlg32）
-│   ├── tray.py                 # 系统托盘（pystray，失败静默降级）
-│   ├── logging_setup.py        # 日志初始化
-│   └── __init__.py             # APP_VERSION + frozen 模式 DLL 搜索路径
-├── build/
-│   ├── bili-transcriber.spec        # PyInstaller onedir 配置
-│   ├── bili-transcriber-onefile.spec# PyInstaller onefile 配置
-│   ├── preload_transformers.py      # 打包运行时钩子（transformers/nagisa 兼容）
-│   ├── installer.iss                # InnoSetup 安装包脚本
-│   └── smoke_*.py / verify_*.py     # 打包冒烟与验证脚本
-├── scripts/
-│   ├── release.py              # 一键发布：bump + wheel + 便携 + 安装包 + 单文件 + GPU 包
-│   ├── e2e_check.py            # 端到端链路检查
-│   └── bdelete/clean_*/move_old/sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest 套件（21 文件 / 243 用例）
-├── docs/                       # 中英双语用户手册 + 技术手册
-├── data/                       # settings.json + history.db（运行时）
-├── output/                     # 转写产物（运行时）
-└── pyproject.toml              # 版本单一来源
-```
-
-## 4. 模块职责（要点）
-
-### 4.1 `main.py` — UI 与事件循环
-- 三页签：**任务 / 历史 / 设置**；UI 线程每 **0.6s** 轮询 `Store` 并消费事件 `deque(maxlen=200)`。
-- 引擎切换联动：`model_select` 选项按引擎自动切换（`MODEL_OPTIONS` / `QWEN_MODEL_OPTIONS` / `SENSEVOICE_MODEL_OPTIONS`），非法组合自动纠正。
-- 表格行级事件：NiceGUI `$emit('open-path', path)` → `e.args` 为 `[path]` 列表，经 `_first_arg(e)` 解包后 `_open_path()` 降级打开（文件缺失→父目录→输出目录）；explorer `/select,"path"` 引号包裹防空格断参。
-- 启动模式：默认浏览器模式（不依赖 WebView2，100% 可靠）；`BILI_FORCE_NATIVE=1` 时尝试 pywebview 原生窗口；`BILI_PORT` 覆盖端口（默认 8765）。
-
-### 4.2 `pipeline.py` — 核心编排
-- **并发模型（v0.1.34）**：`WORKERS = 2` 工作线程并发取队列（下载/转码可重叠），**转写由三层锁保护**：
-  - `_model_lock`（pipeline）：保护 transcriber 实例的懒加载/替换（设置变更时重建）。
-  - 引擎内部 `self._lock`：`transcribe()` 串行化，确保同一时刻只有一个任务占用模型/显存。
-  - 引擎 `load()` 为 **double-checked locking**：判空+加载整体在锁内，杜绝冷启动双加载（v0.1.32 起修复，含三引擎并发回归测试）。
-- **状态机**：`queued → downloading → converting → transcribing → extracting(可选) → saving → done / failed`；支持任务级暂停/取消（`task_control.py`）。
-- **断点续跑**：`audio_path` / `wav_path` 缓存复用，重跑跳过已完成的下载/转码。
-- **缓存清理容错**：删除中间产物被沙箱拦截抛 `OSError` 时降级 warning，任务仍 `done`。
-
-### 4.3 `downloader.py` — 下载编排
-- **平台识别**：按域名分流 `bilibili / youtube / douyin / xiaohongshu / kuaishou`，未知平台按 B站兼容处理；media_id 前缀 `yt_/dy_/xhs_/ks_`。
-- **短链与安全**：b23.tv 等短链展开走**域名白名单**校验 + **DNS-rebinding 防护**（解析 IP 复核）后再跟随重定向；抖音分享链经 `modal_id` / 重定向两种正则提取视频 id。
-- **Cookie/代理**：`cookiefile`（cookies.txt）优先于 `cookiesfrombrowser`（浏览器名不在 SUPPORTED_BROWSERS 时忽略，避免 YoutubeDL 构造抛错）；代理形如 `http://127.0.0.1:7890` / `socks5://…`。
-- **网络探测缓存**：`_reach_cache` 在代理变更后清空重测。
-
-### 4.4 三转写引擎
-| 模块 | 后端 | 时间戳 | 语言映射 |
-|------|------|--------|----------|
-| `transcriber.py` | faster-whisper/ctranslate2 | 原生 | whisper 代码 |
-| `qwen_transcriber.py` | qwen-asr(torch) + ForcedAligner | aligner 对齐；缺失时按时长降级估算 | `_map_qwen_language()` whisper→全名，未知回退 auto |
-| `sensevoice_transcriber.py` | sherpa-onnx int8 | token 级时间戳聚合 `_tokens_to_segments()` | `_map_sensevoice_language()` |
-
-- **模型懒加载 + 缓存键**：`(model_size, device, compute_type, language, vad)` 变化才重载。
-- **VAD 自愈**：Silero VAD 滤除全部语音（纯音乐）时自动关闭重试一次。
-- **Qwen 分块转写**：长音频切 60s 块逐块推理，`on_event` 上报「第 i/n 块」进度；1.7B 在 CPU 上主动提示慢。
-
-### 4.5 `models.py` — 模型管理
-- `default_model_dir()`：`%LOCALAPPDATA%\Bili Note\models`；`resolve_model_dir()` 支持用户自定义。
-- `scan_models()` / `describe_models()`：按三引擎特征文件识别目录完整性（缺文件/版本匹配/单 qwen 目录回退），结果驱动设置页「检测模型」。
-- `find_{whisper,qwen_asr,sensevoice}_model()`：从模型目录定位具体模型；在线下载经 `download_root` 落到统一模型目录。
-
-### 4.6 `gpu_runtime.py` — 外置 GPU 加速包
-- 检测 `%LOCALAPPDATA%\Bili Note\gpu` 下的 CUDA DLL（cudnn/cublas/cufft 等 17 个），`add_dll_directory` + PATH 注入后 ctranslate2 才能加载。
-- `ensure_gpu_or_cpu()`：GPU 包缺失时静默回退 CPU，用户无感。
-
-### 4.7 `keyframes.py` — 关键帧提取（双后端）
-- **ffmpeg 后端（优先）**：`select='gte(scene,0)'` + `metadata=print` 流式解析每帧分数（阈值 0.11），切换点 `-ss` 快照；逐帧回调支撑进度/取消。
-- **PyAV 后端（回退）**：64x36 灰度 MAD>15 判定切换。
-- 公共策略：首帧必截；切换后 0.4s 截取；最小间隔 5s；上限 400 帧；`KeyframeError` 与用户取消不回退直接上抛。
-
-### 4.8 `store.py` — 存储
-- **SQLite**（`data/history.db`）：历史索引，UPSERT 主键 `media_id`。
-- **JSON**（`data/settings.json`）14 项：`output_dir / model_size / device / compute_type / language / keep_audio / vad / notes / engine / model_dir / cookies_from_browser / cookie_file / proxy`。
-
-## 5. 数据流
-
-```
-URL → downloader.probe（平台识别+短链展开）
-      └─ for entry in entries（WORKERS=2 并发取队列）:
-           1. download → audio_path          # 缓存命中跳过
-           2. to_wav16k_mono → wav_path      # 缓存命中跳过
-           3. transcriber.transcribe(wav)    # 引擎锁串行；GPU 优先
-           4. (notes) keyframes → writers.write_notes_md
-           5. writers.write_srt/txt/md → 落盘
-           6. 清理中间产物                    # 失败降级 warning
-           └─ store.update(job: done)
-UI 线程 0.6s 轮询 Store + 消费事件 deque → 刷新界面
-```
-
-## 6. 线程模型
-
-```
-┌─────────────┐     Store/DB      ┌──────────────────┐
-│  UI 线程    │ ─── 只读轮询 ───▶ │   SQLite + JSON   │
-│ (NiceGUI)   │ ◀── 事件 deque ── │   (Store)        │
-└─────────────┘                   └──────────────────┘
-                                        ▲ 只写
-┌────────────────────────┐              │
-│ WORKERS=2 工作线程      │ ─────────────┘
-│  download / convert 可重叠 │
-│  transcribe 串行(引擎锁)   │
-└────────────────────────┘
-```
-
-设计要点：工作线程只写 Store/事件队列，UI 只读轮询，无共享可变状态竞态；转写 GPU 重负载经引擎锁串行，规避显存争用与 OOM。
-
-## 7. 打包兼容性（PyInstaller 坑位清单）
-
-| 问题 | 对策 |
-|------|------|
-| transformers 误检 sklearn → GenerationMixin 导入崩 | spec `excludes=["sklearn"]` + 运行时钩子 `preload_transformers.py` 置 `_sklearn_available=False` |
-| nagisa 裸导入 `prepro`（PEP366）失败 | 钩子将 nagisa 包目录 `sys.path` 插入（不可 `import nagisa.prepro`，会循环导入）；hiddenimports 补 `nagisa/dynet/_dynet` |
-| 沙箱 safe-delete 钩子拦截 PyInstaller 清理 | `release.py` 先 `_evacuate()` 把旧 dist/build 目录改名撤离，`--noconfirm` 无物可删 |
-| onefile 原生窗口白屏 | 默认浏览器模式；`BILI_FORCE_NATIVE=1` 显式开启 |
-| CUDA DLL 定位 | `__init__.py` frozen 模式注入 `sys._MEIPASS` 搜索路径 + `gpu_runtime` 注册外置包 |
-
-## 8. 构建与发布
-
-### 8.1 版本管理
-- **单一来源**：`pyproject.toml` 的 `version`。
-- `scripts/release.py` 自动 bump 并同步 **三处**：`build/installer.iss` 的 `AppVersion`、`app/__init__.py` 的 `APP_VERSION`（tests 有三处一致性校验）。
-
-### 8.2 五产物
-| 产物 | 输出 |
-|------|------|
-| Wheel | `dist/bili_transcriber-{ver}-py3-none-any.whl` |
-| 便携包 | `dist/bili-transcriber-portable-{ver}.zip`（onedir 全量，~6900 文件） |
-| 安装包 | `dist/bili-transcriber-setup-{ver}.exe`（InnoSetup） |
-| 单文件版 | `dist/bili-transcriber-single-{ver}.exe`（onefile，CPU 模式） |
-| GPU 加速包 | `dist/bili-transcriber-gpu-{ver}.zip`（17 个 CUDA DLL，解压到 %LOCALAPPDATA%） |
-
-产物进程内校验：zip `testzip`、PE 头（MZ/PE）、`_built_fresh()` 时间戳防陈旧产物误发。
-
-### 8.3 命令
 ```powershell
-python scripts/release.py            # 一键：bump + 全部产物
-python scripts/release.py --wheel-only
-python scripts/release.py --single-only
-python scripts/release.py --setup-only
+python -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\pytest -q                    # 当前 344 passed
+.venv\Scripts\python -m app.main           # 开发运行
 ```
 
-## 9. 测试
+测试分成三档：单元（store / writers / downloader）、编排（pipeline，注入 Fake 边界）、UI（NiceGUI `user_plugin`）。另有打包冒烟脚本在 `build/smoke_*.py`。
 
-`tests/` 共 **21 个文件 / 243 用例**（v0.1.34 全绿），覆盖：
+### 打包发布
 
-| 领域 | 文件（示例） | 策略 |
-|------|--------------|------|
-| 存储 | test_store.py | 真实 SQLite 临时库 |
-| 下载 | test_downloader.py / test_kuaishou.py | mock yt-dlp / SSR HTML 夹具 |
-| 三引擎 | test_transcriber / test_qwen_transcriber / test_sensevoice_transcriber | FakeModel 注入；**并发 load() 回归**（Barrier(2) 断言仅加载一次） |
-| 编排 | test_pipeline.py | FakeDownloader/FakeTranscriber mock 外部边界 |
-| UI | test_ui.py / test_main_helpers.py | NiceGUI user_plugin；`_first_arg`/explorer 引号单测 |
-| 打包 | test_nagisa_ascii.py 等 | 运行时钩子与兼容性 |
-| 讲义 | test_keyframes.py / test_writers.py | 双后端阈值标定与落盘内容 |
+```powershell
+python scripts/release.py                # 一键：bump 版本 → wheel → 便携 → 安装包 → 单文件 → GPU 包
+python scripts/release.py --wheel-only   # 快速交付
+```
 
-运行：`.venv\Scripts\pytest -q`
+版本号单一来源是 `pyproject.toml`；`release.py` 自动同步 `app/__init__.py`、`build/installer.iss`、四份手册头部声明，并生成带版本后缀的手册快照。
 
-## 10. 已知限制
+五个产物：
 
-- 仅验证 Windows；macOS/Linux 未验证（pywebview 原生窗口与 comdlg32 均为 Windows 专属）。
-- Qwen3-ASR/SenseVoice 的 Qwen 为 CPU 可跑但慢；GPU 提速仅覆盖 whisper 引擎（ctranslate2）。
-- 沙箱/受限环境下 PyInstaller 重跑可能被安全删除策略拦截，最终 exe 构建需在本机完成。
-- 快手 SSR 解析依赖分享页结构，站点改版需同步更新 `app/kuaishou.py`。
-）](technical-manual-zh.md) / [Technical Manual (English)](technical-manual-en.md)。*
-[technical-manual-zh-0.1.32.md](https://github.com/user-attachments/files/32939693/technical-manual-zh-0.1.32.md)
-
+| 产物 | 输出 |
+|---|---|
+| Wheel | `dist/bili_transcriber-{ver}-py3-none-any.whl` |
+| 便携包 | `dist/bili-transcriber-portable-{ver}.zip` |
+| 安装包 | `dist/bili-transcriber-setup-{ver}.exe` |
+| 单文件版 | `dist/bili-transcriber-single-{ver}.exe` |
+| GPU 加速包 | `dist/bili-transcriber-gpu-{ver}.zip` |
 
 ---
 
-## 11. 配套 AI 智能体技能（通用版）
+## 文档
 
-本工具负责「链接 → 字幕/转录稿」，后续的知识化加工由配套的**通用 AI 智能体技能**完成（开源仓库：[Asaceoo/bili-note-skills](https://github.com/Asaceoo/bili-note-skills)）：
+| 文档 | 适合谁 |
+|---|---|
+| [用户手册（中文）](docs/user-guide-zh.md) · [English](docs/user-guide-en.md) | 使用者：安装、使用、设置、FAQ |
+| [技术手册（中文）](docs/technical-manual-zh.md) · [English](docs/technical-manual-en.md) | 开发者：架构、线程模型、模块职责、打包坑位 |
+| [AI 集成](docs/ai-integration.md) | CLI / MCP 参数、返回结构、故障排查 |
 
-| 技能 | 作用 | 输入 → 输出 |
-|---|---|---|
-| `bili-note` | 抓取 B 站字幕 / AI 字幕 / 评论，归档原始材料与证据索引 | B 站链接 → 转录稿 + 完整归档 |
-| `bili-content-enhance` | 把转录稿增强为 6 类学习物料（智能摘要 / 术语表 / 知识导图 / 动画 HTML / 补充知识 / 深度理解），带质量门禁 | 转录稿 → 学习包（6 份物料） |
+---
 
-**通用版特性（v1.1.0）**：两个技能**不绑定任何 AI 智能体** —— Claude Code、Cursor、Codex CLI、WPS AI、WorkBuddy、Cline、Gemini CLI 均可直接使用；不支持技能目录的助手把 `SKILL.md` 全文作为系统提示词即可；没有智能体时也能纯命令行执行。技能脚本零第三方依赖（bili-note 只用 Python 标准库，门禁脚本只用 Node 内置模块），登录态路线只要求一个通用 CDP 接口（`GET /targets` 与 `GET /eval`，默认 `http://localhost:3456`）。
+## 配套 AI 技能（可选）
 
-安装（按平台选一行）：
+转写只解决「视频 → 文字」。后续的知识化加工由配套的通用 AI 技能完成（开源：[Asaceoo/bili-note-skills](https://github.com/Asaceoo/bili-note-skills)）：
 
-```bash
-git clone https://github.com/Asaceoo/bili-note-skills.git
-cp -r bili-note-skills/skills/bili-note ~/.claude/skills/            # WorkBuddy: ~/.workbuddy/skills/；Codex: ~/.codex/skills/
-cp -r bili-note-skills/skills/bili-content-enhance ~/.claude/skills/
-```
+| 技能 | 作用 |
+|---|---|
+| `bili-note` | 抓 B 站字幕 / AI 字幕 / 评论，归档原始材料与证据索引 |
+| `bili-content-enhance` | 把转录稿增强为 6 类学习物料（摘要 / 术语表 / 知识导图 / 动画 HTML / 补充知识 / 深度理解） |
 
-典型串联：本工具导出 `.md` / `.txt` / `.srt` 转录稿 → 把文件交给任意 AI 智能体 → 说「用提示词跑一份文档 / 生成学习包」→ 得到 6 份物料的学习包 → `node scripts/validate.js <学习包目录>` 跑质量门禁。
+两个技能**不绑定任何 AI 智能体** —— Claude Code、Cursor、Codex CLI、WorkBuddy、Cline、Gemini CLI 都能用；不支持技能目录的助手把 `SKILL.md` 当系统提示词即可。
 
-完整说明见技能仓库的 [中文手册](https://github.com/Asaceoo/bili-note-skills/blob/main/docs/manual-zh.md)。
+---
+
+## 许可证
+
+见 [LICENSE](LICENSE)。

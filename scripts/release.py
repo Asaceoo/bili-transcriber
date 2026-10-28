@@ -240,11 +240,51 @@ DOC_SNAPSHOTS = {
 }
 
 
+def _sync_doc_header(src: Path, ver: str) -> bool:
+    """把滚动版手册头部的版本声明与快照链接改成本次发布版本。
+
+    以前每次发布都要手工 sed 一遍四份手册(否则快照带着上一版声明,
+    release.py 只能打警告)。这里由脚本统一维护,版本号与 pyproject 单一来源一致。
+
+    头部声明与快照链接可能**不在同一行**(常见写法是下一行补一句
+    「带版本号的发布快照见 [...]」),所以两者各自独立扫描,不能绑在一行上。
+    """
+    text = src.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    found = False
+    for i, line in enumerate(lines[:20]):  # 声明行固定在文件头部
+        new_line = line
+        if ("对应" in line or "matches" in line) and re.search(
+                r"\*\*v\d+\.\d+\.\d+\*\*", line):
+            new_line = re.sub(r"\*\*v\d+\.\d+\.\d+\*\*", f"**v{ver}**", new_line)
+            found = True
+        if re.search(r"-\d+\.\d+\.\d+\.md", new_line):
+            new_line = re.sub(r"-\d+\.\d+\.\d+\.md", f"-{ver}.md", new_line)
+            found = True
+        if new_line != line:
+            lines[i] = new_line
+    if found:
+        src.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return found
+
+
+def sync_readme_header(ver: str) -> None:
+    """README 只维护一份滚动版(不生成快照),头部版本声明随发布自动递增。"""
+    readme = ROOT / "README.md"
+    if not readme.is_file():
+        print("[release] !! 警告: README.md 缺失")
+        return
+    if _sync_doc_header(readme, ver):
+        print(f"[release] README 版本声明同步: v{ver}")
+    else:
+        print("[release] !! 警告: README.md 头部无版本声明行")
+
+
 def snapshot_docs(ver: str) -> list[Path]:
     """生成带版本号后缀的手册快照(如 user-guide-zh-0.1.33.md)。
 
-    快照内容与最新手册一致,仅把头部「本手册对应 vX」说明行替换为
-    发布快照声明,便于与滚动更新的最新版区分。
+    先把滚动版头部声明同步到本次版本,再把该行替换为发布快照声明,
+    保证滚动版与快照的版本号都不会落后于源码。
     """
     out: list[Path] = []
     for src_name, pat in DOC_SNAPSHOTS.items():
@@ -252,10 +292,13 @@ def snapshot_docs(ver: str) -> list[Path]:
         if not src.is_file():
             print(f"[release] !! 文档缺失,跳过快照: {src_name}")
             continue
+        if not _sync_doc_header(src, ver):
+            print(f"[release] !! 警告: {src_name} 头部无版本声明行,快照保留原头部")
         text = src.read_text(encoding="utf-8")
         lines = text.splitlines()
         marker = f"**v{ver}**"
         replaced = False
+        drop = -1
         for i, line in enumerate(lines):
             if marker in line and ("对应" in line or "matches" in line):
                 lines[i] = (
@@ -263,11 +306,18 @@ def snapshot_docs(ver: str) -> list[Path]:
                     "版本号取自 `pyproject.toml` 单一来源。"
                 )
                 replaced = True
+                # 滚动版下一行常有「带版本号的发布快照见 [...]」——
+                # 在快照里这句会指向自己,是冗余,直接删掉。
+                nxt = lines[i + 1] if i + 1 < len(lines) else ""
+                if re.search(r"-\d+\.\d+\.\d+\.md", nxt) and (
+                        "快照" in nxt or "release copy" in nxt
+                        or "versioned release" in nxt):
+                    drop = i + 1
                 break
+        if drop >= 0:
+            del lines[drop]
         if not replaced:
-            # 滚动版头部声明版本落后于源码版本时在此暴露,避免快照带过期声明
-            print(f"[release] !! 警告: {src_name} 头部无「对应/matches **v{ver}**」声明行,"
-                  f"快照保留原头部(请把滚动版手册头部版本更新到 v{ver})")
+            print(f"[release] !! 警告: {src_name} 头部声明同步失败,快照带过期头部")
         dst = ROOT / "docs" / pat.format(ver=ver)
         dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
         out.append(dst)
@@ -300,6 +350,7 @@ def main() -> None:
         print(f"[release] wheel: {whl.name if whl else 'FAILED'}")
 
     snapshot_docs(ver)  # 版本号随发布自动增加,生成带后缀手册快照
+    sync_readme_header(ver)  # README 只有滚动版,同步头部声明
 
     if args.wheel_only:
         print("[release] --wheel-only 完成")

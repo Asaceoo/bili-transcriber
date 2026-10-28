@@ -27,6 +27,14 @@ UpdateCallback = Callable[[Job], None]  # 类型别名:任务更新回调(job) -
 # 下次任务提交会自动重新加载(懒加载机制),仅损失一次冷启动时间。
 MODEL_IDLE_UNLOAD_SEC = 600
 
+# "任务正被处理"的状态集合(UI 用它分进行中/历史两张表)。
+# 单一来源:app/ui/state.py 直接复用,避免两处定义漂移。
+ACTIVE_STATUSES = frozenset({
+    "queued", "downloading", "converting", "transcribing", "extracting",
+    "saving", "paused",
+})
+TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
+
 
 @dataclass
 class Task:
@@ -47,7 +55,7 @@ class Pipeline:
     WORKERS = 2  # 并发工作线程数
 
     def __init__(self, downloader: Downloader, store: Store, settings: Settings,
-                 base_dir: Path, on_event=None):
+                 base_dir: Path, on_event=None, recover_paused: bool = True):
         self.downloader = downloader
         self.store = store
         self.settings = settings
@@ -55,6 +63,9 @@ class Pipeline:
         self.cache_dir = base_dir / "cache"
         self.uploads_dir = base_dir / "uploads"
         self.uploads_dir.mkdir(parents=True, exist_ok=True)
+        # 无界面进程(CLI/MCP)不应把桌面端"已暂停"的任务自动恢复执行:
+        # 那属于 GUI 会话的显式操作,后台进程擅自复活会打断用户预期。
+        self._recover_paused = recover_paused
         self.on_event = on_event  # (message: str) -> None,工作线程回调
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._workers: list[threading.Thread] = []
@@ -64,6 +75,10 @@ class Pipeline:
         self._stop = threading.Event()
         self._progress_throttle = 0.03  # 进度写库的最小步进
         self._control = TaskControl()
+        self._prepared: dict[str, MediaInfo] = {}  # 预解析提交:media_id -> MediaInfo
+        # 已入队但尚未被 worker 取走的 media_id:start() 的遗留任务恢复据此去重,
+        # 否则"提交 → 启动"会同一任务入队两次,两个 worker 并行重复下载/转写。
+        self._scheduled: set[str] = set()
         self._paused_prev: dict[str, str] = {}  # 暂停前阶段,恢复时还原
         self._last_activity: dict[str, float] = {}  # 各任务最近一次进度更新时间(卡顿检测)
         self._recovered_paused = False
@@ -80,17 +95,29 @@ class Pipeline:
         if alive:
             return
         self._stop.clear()
-        if not self._recovered_paused:
-            # 上次会话遗留的"已暂停"任务:恢复为排队并重新入队(控制状态不跨进程持久化)
+        if not self._recovered_paused and self._recover_paused:
+            # 上次会话遗留任务续跑(仅桌面会话做:后台进程不替用户做主)
             self._recovered_paused = True
+            recovered = 0
             for job in self.store.list_jobs():
-                if job.status == "paused":
-                    job.status, job.progress, job.error = "queued", 0.0, ""
-                    self.store.upsert_job(job)
-                    self._queue.put(Task(
-                        kind="local" if job.source_type == "local" else "url",
-                        url=job.url, media_id=job.media_id,
-                    ))
+                if job.media_id in self._scheduled:
+                    continue  # 本进程刚提交、还在队列里等 worker 取走
+                if job.status not in ACTIVE_STATUSES:
+                    continue
+                # 上次会话遗留的进行中状态:queued(关闭应用/崩溃/CLI --no-wait)、
+                # paused(暂停后退出),以及 downloading/transcribing 等被强杀在
+                # 半路的状态。新进程里没有任何线程在处理它们,不重新入队就会永远
+                # 停在那个阶段(真机复现:CLI --no-wait 退出后任务永久"转写中")。
+                job.status, job.progress, job.error, job.finished_at = "queued", 0.0, "", ""
+                self.store.upsert_job(job)
+                # prepared 分支优先:进程内无 _prepared 时按 Job 字段重建,不二次 probe
+                self._enqueue(Task(
+                    kind="local" if job.source_type == "local" else "prepared",
+                    url=job.url, media_id=job.media_id,
+                ))
+                recovered += 1
+            if recovered:
+                self._emit(f"恢复上次未完成的任务:{recovered} 个")
         self._workers = [
             threading.Thread(target=self._run, name=f"pipeline-worker-{i}",
                              daemon=True)
@@ -109,6 +136,11 @@ class Pipeline:
         for _ in range(len(self._workers)):
             self._queue.put(None)
 
+    def _enqueue(self, task: Task) -> None:
+        if task.media_id:
+            self._scheduled.add(task.media_id)
+        self._queue.put(task)
+
     def submit(self, url: str) -> None:
         self._queue.put(Task(kind="url", url=url.strip()))
         self.start()
@@ -126,6 +158,10 @@ class Pipeline:
         if job and job.status == "done" and job.md_path and Path(job.md_path).exists():
             self._emit(f"已存在,跳过:{job.title}")
             return
+        if job and job.status in ACTIVE_STATUSES:
+            # 同一文件重复提交(上传两次/CLI 重试):保持原状态,不重置排队位
+            self._emit(f"已在处理中,跳过:{job.title}")
+            return
         job = job or Job(
             media_id=media_id, bv="", title=path.stem, uploader="本地文件",
             duration=duration, url="", source_type="local",
@@ -133,9 +169,55 @@ class Pipeline:
         job.title, job.duration = path.stem, duration
         job.audio_path = str(path)
         job.status, job.progress, job.error, job.finished_at = "queued", 0.0, "", ""
+        # 同 submit_prepared:取消后重新上传同一文件时应重新执行,清掉旧控制位
+        self._control.clear(media_id)
         self.store.upsert_job(job)
-        self._queue.put(Task(kind="local", media_id=media_id))
+        self._enqueue(Task(kind="local", media_id=media_id))
         self.start()
+
+    def submit_prepared(self, entries: list[MediaInfo]) -> list[dict]:
+        """提交已 probe 展开的条目(CLI/MCP 用):省去 worker 内二次解析。
+
+        返回每个条目的处理结果,便于调用方立即拿到 media_id 轮询:
+            {"media_id", "title", "status": "queued" | "skipped" | "cancelled"}
+        与 submit(url) 的差异:不重新 probe,直接入队;已完成的条目按既有
+        语义跳过(skipped),不会重复转写。
+        """
+        results: list[dict] = []
+        for info in entries:
+            existing = self.store.get_job(info.media_id)
+            if (existing and existing.status == "done" and existing.md_path
+                    and Path(existing.md_path).exists()):
+                results.append({"media_id": existing.media_id, "title": existing.title,
+                                "status": "skipped"})
+                continue
+            if existing and existing.status in ACTIVE_STATUSES:
+                # 已在队列/正在执行:重复提交(典型场景:AI 客户端等待超时后重试)
+                # 绝不能再把状态打回 queued 并二次入队 —— 那会让同一视频被重复
+                # 下载+转写,GPU 时间翻倍,两次执行还会互相覆盖产物。
+                results.append({"media_id": existing.media_id, "title": existing.title,
+                                "status": "running", "stage": existing.status})
+                continue
+            job = existing or Job(
+                media_id=info.media_id, bv=info.bv, title=info.title,
+                uploader=info.uploader, duration=info.duration, url=info.url,
+                part=info.part, total_parts=info.total_parts,
+            )
+            job.title, job.duration = info.title, info.duration
+            job.status, job.progress, job.error, job.finished_at = "queued", 0.0, "", ""
+            self.store.upsert_job(job)
+            # 新提交视为新的用户意图:清掉同 media_id 遗留的取消/暂停控制位,
+            # 否则 worker 会在 _process_ready 里读到旧的 "cancelled" 立即中止,
+            # 表现为"重新提交却永远停在已取消/秒失败"。
+            self._control.clear(info.media_id)
+            self._prepared[info.media_id] = info
+            self._enqueue(Task(kind="prepared", media_id=info.media_id))
+            results.append({"media_id": info.media_id, "title": info.title, "status": "queued"})
+        if any(r["status"] == "queued" for r in results):
+            # 只有真的入队才启动:全部是 skipped/running 时启动会触发
+            # start() 里的遗留任务恢复,把正在跑的任务再排一遍。
+            self.start()
+        return results
 
     @staticmethod
     def _local_hash(path: Path) -> str:
@@ -310,10 +392,10 @@ class Pipeline:
         job.finished_at = ""
         self.store.upsert_job(job)
         if job.source_type == "local":
-            self._queue.put(Task(kind="local", media_id=media_id))
+            self._enqueue(Task(kind="local", media_id=media_id))
             self.start()
         else:
-            self._queue.put(Task(kind="url", url=job.url, media_id=media_id))
+            self._enqueue(Task(kind="url", url=job.url, media_id=media_id))
             self.start()
 
     # ---------- 内部 ----------
@@ -410,6 +492,8 @@ class Pipeline:
                     self._process_url(item.url, item.media_id)
                 elif item.kind == "local":
                     self._process_local(item.media_id)
+                elif item.kind == "prepared":
+                    self._process_prepared(item.media_id)
             except Exception:
                 logger.exception("处理任务失败: %s", item)
                 self._emit(f"处理任务失败:{item}")
@@ -479,8 +563,37 @@ class Pipeline:
 
     def _process_local(self, media_id: str) -> None:
         job = self.store.get_job(media_id)
+        self._scheduled.discard(media_id)  # worker 已取走,不再算"在队"
         if not job:
             return
+        info = MediaInfo(
+            media_id=job.media_id, bv="", title=job.title, uploader=job.uploader,
+            duration=job.duration, url="", part=1, total_parts=1,
+        )
+        self._process_ready(job, info)
+
+    def _process_prepared(self, media_id: str) -> None:
+        """处理 submit_prepared 入队的条目:用预解析的 MediaInfo,不再 probe。
+
+        进程重启后 _prepared 为空(内存态),此时按 Job 字段重建 MediaInfo,
+        与本地任务的处理方式一致(下载/转写所需字段齐全)。
+        """
+        job = self.store.get_job(media_id)
+        self._scheduled.discard(media_id)
+        info = self._prepared.pop(media_id, None)
+        if not job:
+            return
+        if info is None:
+            info = MediaInfo(
+                media_id=job.media_id, bv=job.bv, title=job.title,
+                uploader=job.uploader, duration=job.duration, url=job.url,
+                part=job.part, total_parts=job.total_parts,
+            )
+        self._process_ready(job, info)
+
+    def _process_ready(self, job: Job, info: MediaInfo) -> None:
+        """已落库任务的实际执行入口(本地任务/预解析任务共用)。"""
+        media_id = job.media_id
         # 终态保护:排队中被取消的任务,worker 消费到时直接落 cancelled 并跳过,
         # 不进入转码/转写流程(wait_if_paused 也能拦截,这里早退少做无效工作)。
         if self._control.check(media_id) == "cancelled":
@@ -491,10 +604,6 @@ class Pipeline:
             self._control.clear(media_id)
             self._emit(f"已取消:{job.title}")
             return
-        info = MediaInfo(
-            media_id=job.media_id, bv="", title=job.title, uploader=job.uploader,
-            duration=job.duration, url="", part=1, total_parts=1,
-        )
         # 排队中被暂停的任务:状态显示为已暂停(worker 会在 wait_if_paused 阻塞)
         if self._control.check(media_id) == "paused":
             job.status = "paused"

@@ -39,9 +39,13 @@ def setup_logging() -> Path:
     fh.setFormatter(fmt)
     root.addHandler(fh)
 
-    sh = logging.StreamHandler(sys.stderr)
-    sh.setFormatter(fmt)
-    root.addHandler(sh)
+    # 打包为窗口程序(console=False)且无重定向时 stderr 为 None:
+    # 此时挂 StreamHandler 只会在每次 emit 时触发 logging 内部错误,
+    # 干脆只留文件日志。
+    if sys.stderr is not None:
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setFormatter(fmt)
+        root.addHandler(sh)
 
     root._bili_configured = True
 

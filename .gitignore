@@ -15,6 +15,9 @@ dist/
 build/bili-transcriber/
 # 单文件便携版构建目录(PyInstaller --onefile 工作目录)
 build/bili-transcriber-onefile/
+# 真机验证用的临时音频与 stdio 探针目录(本地生成,不入库)
+build/smoke_*.wav
+build/probe_stdio/
 # release.py 撤离旧构建时产生的同名备份目录(同目录 rename,不入库)
 build/*.bak_*/
 dist/*.bak_*/

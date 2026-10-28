@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" width="1200" height="430" role="img" aria-label="处理流程：链接或文件到 SRT/TXT/Markdown">
+  <defs>
+    <linearGradient id="pbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0F172A"/>
+      <stop offset="1" stop-color="#0B1222"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FB7299"/>
+      <stop offset="0.5" stop-color="#B98BFF"/>
+      <stop offset="1" stop-color="#4CC2FF"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#5A6B8C"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="430" rx="18" fill="url(#pbg)"/>
+
+  <g font-family="Segoe UI, PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="48" y="52" fill="#FFFFFF" font-size="24" font-weight="600">一条链接的旅程</text>
+    <text x="48" y="80" fill="#8296B5" font-size="14">下载、转码、转写、落盘全在本机完成，中间产物自动清理，失败可断点续跑</text>
+
+    <!-- 连接线 -->
+    <line x1="170" y1="210" x2="215" y2="210" stroke="#5A6B8C" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="365" y1="210" x2="410" y2="210" stroke="#5A6B8C" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="560" y1="210" x2="605" y2="210" stroke="#5A6B8C" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="755" y1="210" x2="800" y2="210" stroke="#5A6B8C" stroke-width="2" marker-end="url(#arrow)"/>
+    <line x1="950" y1="210" x2="995" y2="210" stroke="#5A6B8C" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 1 输入 -->
+    <g>
+      <rect x="48" y="148" width="122" height="132" rx="14" fill="#16213A" stroke="#2B3A5C"/>
+      <circle cx="76" cy="176" r="13" fill="#FB7299" fill-opacity="0.18" stroke="#FB7299" stroke-opacity="0.6"/>
+      <text x="76" y="183" fill="#FFB3C7" font-size="13" text-anchor="middle">1</text>
+      <text x="109" y="224" fill="#FFFFFF" font-size="16" font-weight="600" text-anchor="middle">链接 / 文件</text>
+      <text x="109" y="246" fill="#8296B5" font-size="12" text-anchor="middle">BV / 合集 / 本地</text>
+    </g>
+
+    <!-- 2 解析 + 下载 -->
+    <g>
+      <rect x="215" y="148" width="150" height="132" rx="14" fill="#16213A" stroke="#2B3A5C"/>
+      <circle cx="243" cy="176" r="13" fill="#B98BFF" fill-opacity="0.18" stroke="#B98BFF" stroke-opacity="0.6"/>
+      <text x="243" y="183" fill="#D9C2FF" font-size="13" text-anchor="middle">2</text>
+      <text x="290" y="224" fill="#FFFFFF" font-size="16" font-weight="600" text-anchor="middle">解析并下载</text>
+      <text x="290" y="246" fill="#8296B5" font-size="12" text-anchor="middle">yt-dlp · Cookie 登录态</text>
+    </g>
+
+    <!-- 3 转码 -->
+    <g>
+      <rect x="410" y="148" width="150" height="132" rx="14" fill="#16213A" stroke="#2B3A5C"/>
+      <circle cx="438" cy="176" r="13" fill="#7AA2FF" fill-opacity="0.18" stroke="#7AA2FF" stroke-opacity="0.6"/>
+      <text x="438" y="183" fill="#BFD3FF" font-size="13" text-anchor="middle">3</text>
+      <text x="485" y="224" fill="#FFFFFF" font-size="16" font-weight="600" text-anchor="middle">转码 16 kHz</text>
+      <text x="485" y="246" fill="#8296B5" font-size="12" text-anchor="middle">PyAV 内置 · 无外部依赖</text>
+    </g>
+
+    <!-- 4 转写 -->
+    <g>
+      <rect x="605" y="148" width="150" height="132" rx="14" fill="#1B2440" stroke="#FB7299" stroke-opacity="0.45"/>
+      <circle cx="633" cy="176" r="13" fill="#FB7299" fill-opacity="0.18" stroke="#FB7299" stroke-opacity="0.6"/>
+      <text x="633" y="183" fill="#FFB3C7" font-size="13" text-anchor="middle">4</text>
+      <text x="680" y="224" fill="#FFFFFF" font-size="16" font-weight="600" text-anchor="middle">本地转写</text>
+      <text x="680" y="246" fill="#8296B5" font-size="12" text-anchor="middle">Whisper / Qwen3</text>
+      <text x="680" y="264" fill="#8296B5" font-size="12" text-anchor="middle">SenseVoice · GPU/CPU</text>
+    </g>
+
+    <!-- 5 落盘 -->
+    <g>
+      <rect x="800" y="148" width="150" height="132" rx="14" fill="#16213A" stroke="#2B3A5C"/>
+      <circle cx="828" cy="176" r="13" fill="#35D07F" fill-opacity="0.18" stroke="#35D07F" stroke-opacity="0.6"/>
+      <text x="828" y="183" fill="#9DF0C4" font-size="13" text-anchor="middle">5</text>
+      <text x="875" y="224" fill="#FFFFFF" font-size="16" font-weight="600" text-anchor="middle">原子落盘</text>
+      <text x="875" y="246" fill="#8296B5" font-size="12" text-anchor="middle">SRT / TXT / MD</text>
+    </g>
+
+    <!-- 6 讲义 -->
+    <g>
+      <rect x="995" y="148" width="150" height="132" rx="14" fill="#16213A" stroke="#2B3A5C"/>
+      <circle cx="1023" cy="176" r="13" fill="#FFC46B" fill-opacity="0.18" stroke="#FFC46B" stroke-opacity="0.6"/>
+      <text x="1023" y="183" fill="#FFDCA8" font-size="13" text-anchor="middle">6</text>
+      <text x="1070" y="224" fill="#FFFFFF" font-size="16" font-weight="600" text-anchor="middle">图文讲义</text>
+      <text x="1070" y="246" fill="#8296B5" font-size="12" text-anchor="middle">关键帧截图 + 字幕对齐</text>
+    </g>
+
+    <!-- 底部说明条 -->
+    <rect x="48" y="314" width="1097" height="72" rx="12" fill="#111B30" stroke="#22304D"/>
+    <g font-size="13" fill="#9FB2D0">
+      <text x="76" y="345">● 断点续跑：已下载的音频、已转好的 wav 直接复用，失败重跑不重头下载</text>
+      <text x="76" y="369">● 进度可见：排队 → 下载 → 转码 → 转写 → 截帧 → 保存，每个阶段都回传进度与错误</text>
+      <text x="700" y="345">● 纯本地：音频、字幕、模型全部留在本机</text>
+      <text x="700" y="369">● 命令行 / MCP：同一套管道，AI 也能直接调用</text>
+    </g>
+  </g>
+</svg>

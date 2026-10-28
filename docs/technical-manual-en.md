@@ -1,249 +1,638 @@
-# bili-transcriber Technical Manual (English)
+# bili-transcriber — Technical Manual (English)
 
-> For developers and maintainers. Covers architecture, module responsibilities, concurrency model, data flow, security mechanisms, build/release process, and the test suite.
-> This manual matches **v0.1.38**. The versioned release copy is [technical-manual-en-0.1.38.md](technical-manual-en-0.1.38.md).
-
-## 1. Overview
-
-bili-transcriber is a **fully local multi-platform video/audio transcription desktop tool**. Core pipeline:
-
-```
-Link (Bilibili/Douyin/Xiaohongshu/Kuaishou/YouTube)
-  → yt-dlp / platform-specific resolver downloads best audio (or video) stream
-  → FFmpeg transcodes to 16kHz mono WAV
-  → local inference engine (faster-whisper / Qwen3-ASR / SenseVoice, one of three)
-  → export SRT / TXT / Markdown (optional illustrated notes.md)
-```
-
-Design principles: no data upload, resumable jobs, lock-protected GPU access, decoupled UI and compute threads.
-
-## 2. Tech Stack
-
-| Layer | Choice |
-|-------|--------|
-| Language | Python ≥ 3.11 (dev env 3.14) |
-| Download | yt-dlp (Bilibili/Douyin/Xiaohongshu/YouTube) + custom Kuaishou SSR parser |
-| Transcode | FFmpeg (subprocess; bundled static build resolved by `app/ffmpeg_bin.py`) |
-| Engine 1 | faster-whisper + ctranslate2 (CUDA backend, default) |
-| Engine 2 | qwen-asr (Qwen3-ASR 0.6B/1.7B, torch backend) |
-| Engine 3 | sherpa-onnx (SenseVoiceSmall, ONNX int8) |
-| Keyframes | FFmpeg scene detection (preferred) / PyAV per-frame MAD (fallback), dual backend |
-| UI | NiceGUI (Quasar), browser mode by default; pywebview native window optional |
-| Tray | pystray (system tray resident, silent degrade) |
-| Native dialog | ctypes comdlg32 (Windows file picker) |
-| Storage | SQLite (history.db index) + JSON (settings.json) |
-| Build | hatchling (wheel) + PyInstaller (onedir/onefile) + InnoSetup (installer) |
-
-## 3. Repository Layout
-
-```
-bili-transcriber/
-├── app/                        # 20 modules
-│   ├── main.py                 # NiceGUI 3-tab UI + events + launch mode
-│   ├── pipeline.py             # orchestration: state machine + WORKERS=2 + engine locks
-│   ├── downloader.py           # platform routing / short links / SSR / cookies / proxy / DNS guard
-│   ├── kuaishou.py             # Kuaishou share-page SSR parser (login-free mp4 direct link)
-│   ├── transcriber.py          # engine 1: faster-whisper wrapper
-│   ├── qwen_transcriber.py     # engine 2: Qwen3-ASR (chunked inference + aligner)
-│   ├── sensevoice_transcriber.py # engine 3: SenseVoice (token→segment timestamps)
-│   ├── converter.py            # FFmpeg → 16kHz mono WAV
-│   ├── keyframes.py            # keyframe extraction (ffmpeg scene / PyAV dual backend)
-│   ├── writers.py              # SRT/TXT/MD/notes.md writers
-│   ├── models.py               # model dir scan/detect/locate (3 engines)
-│   ├── gpu_runtime.py          # external GPU pack DLL registration
-│   ├── ffmpeg_bin.py           # ffmpeg binary resolution (PATH first, bundled fallback)
-│   ├── hardware.py             # hardware probing (GPU model/VRAM/CUDA)
-│   ├── store.py                # SQLite + JSON settings (14 keys defined)
-│   ├── task_control.py         # per-task pause/cancel (thread-safe)
-│   ├── native_dialog.py        # Windows native file picker (ctypes comdlg32)
-│   ├── tray.py                 # system tray (pystray, silent degrade)
-│   ├── logging_setup.py        # logging bootstrap
-│   └── __init__.py             # APP_VERSION + frozen-mode DLL search paths
-├── build/
-│   ├── bili-transcriber.spec         # PyInstaller onedir config
-│   ├── bili-transcriber-onefile.spec # PyInstaller onefile config
-│   ├── preload_transformers.py       # packaged runtime hook (transformers/nagisa compat)
-│   ├── installer.iss                 # InnoSetup script
-│   └── smoke_*.py / verify_*.py      # packaging smoke/verification scripts
-├── scripts/
-│   ├── release.py              # one-click release: bump + wheel + portable + setup + single + gpu
-│   ├── e2e_check.py            # end-to-end link check
-│   └── bdelete/clean_*/move_old/sh_delete.py  # sandbox-safe deletion tools
-├── tests/                      # pytest suite (21 files / 243 cases)
-├── docs/                       # bilingual user guide + technical manual
-├── data/                       # settings.json + history.db (runtime)
-├── output/                     # transcripts (runtime)
-└── pyproject.toml              # single version source
-```
-
-## 4. Module Responsibilities (highlights)
-
-### 4.1 `main.py` + `app/ui/` — UI & Event Loop (split since v0.1.35)
-- **Split layout**: `main.py` (~200 lines) keeps only the process entry (logging/tray/WebView2/launch mode) and **re-exports UI names** for backward compatibility (`from app.main import _first_arg` still works); page logic lives in three `app/ui/` modules: `state.py` (singletons) / `helpers.py` (actions) / `pages.py` (four-tab builder).
-- Four tabs: **Tasks / History / Diary / Settings**; UI thread polls `Store` every **0.6s** and drains the event `deque(maxlen=200)`.
-- Engine switch: `model_select` options follow the engine (`MODEL_OPTIONS` / `QWEN_MODEL_OPTIONS` / `SENSEVOICE_MODEL_OPTIONS`); invalid combos auto-corrected.
-- Row-level events: NiceGUI `$emit('open-path', path)` → `e.args` is `[path]` list, unpacked by `_first_arg(e)`; `_open_path()` degrades file → parent dir → output dir; explorer selection uses Shell API `SHOpenFolderAndSelectItems`.
-- **Safe notifications (v0.1.35)**: helper actions notify via `_notify()` — outside a NiceGUI slot context (tray thread / pure-logic tests) it degrades to logging instead of raising `RuntimeError`.
-- Launch mode: browser mode default (no WebView2 dependency); `BILI_FORCE_NATIVE=1` for pywebview; `BILI_PORT` overrides port (default 8765).
-
-### 4.2 `pipeline.py` — Orchestration
-- **Concurrency (v0.1.35)**: worker count is **configurable** (`Settings.workers`, clamped 1–6, default 2; `apply_settings` hot-rebuilds the pool when idle with no paused jobs); download/convert overlap; **transcription protected by three lock layers**:
-  - `_model_lock` (pipeline): guards transcriber lazy-load/replacement on settings change.
-  - Engine-level `self._lock`: serializes `transcribe()` so only one job holds model/VRAM.
-  - Engine `load()` uses **double-checked locking**: null-check + load inside the lock, eliminating cold-start double-loads (fixed since v0.1.32, with concurrency regression tests for all three engines).
-- **Model prewarm (v0.1.35)**: `prewarm()` loads the model on a background thread (triggered by Settings save); idempotent (skips when a prewarm thread is running / queue busy / already loaded); after loading it verifies the instance is still current and unloads stale ones to prevent leaks.
-- **Idle model unload (v0.1.35)**: `maybe_unload_model(idle_sec=600)` — when the queue stays empty past 10 minutes, the model is unloaded to free VRAM/RAM; triggered from the worker idle branch, race-safe across workers (`_model_lock` + double check). All three engines implement locked, idempotent `unload()`.
-- **State machine**: `queued → downloading → converting → transcribing → extracting(optional) → saving → done / failed`; per-task pause/cancel via `task_control.py`.
-- **Resume-safe**: `audio_path` / `wav_path` cached and reused.
-- **Cleanup tolerance**: `OSError` from sandboxed deletion degrades to warning; job stays `done`.
-
-### 4.3 `downloader.py` — Download Routing
-- **Platform routing** by hostname: `bilibili / youtube / douyin / xiaohongshu / kuaishou` (unknown → bilibili compat); media_id prefixes `yt_/dy_/xhs_/ks_`.
-- **Chunked concurrent download (v0.1.35)**: the download stage passes `http_chunk_size=10MB` (`_HTTP_CHUNK_SIZE`) so yt-dlp pulls ranged chunks over parallel connections — 3–5× faster on large files / throttled sources; probe stage does not download and omits it.
-- **Short links & security**: b23.tv expansion validates against a **domain whitelist** with **DNS-rebinding protection** (resolved-IP recheck) before following redirects; Douyin share links matched via `modal_id` / redirect regexes.
-- **Cookies/proxy**: `cookiefile` (cookies.txt) takes precedence over `cookiesfrombrowser`; unsupported browser names are ignored to keep YoutubeDL construction alive; proxy format `http://127.0.0.1:7890` / `socks5://…`.
-- **Reachability cache**: `_reach_cache` cleared on proxy change.
-
-### 4.4 Three Transcription Engines
-| Module | Backend | Timestamps | Language mapping |
-|--------|---------|-----------|------------------|
-| `transcriber.py` | faster-whisper/ctranslate2 | native | whisper codes |
-| `qwen_transcriber.py` | qwen-asr(torch) + ForcedAligner | aligner; duration-based fallback when absent | `_map_qwen_language()` whisper→full name, unknown→auto |
-| `sensevoice_transcriber.py` | sherpa-onnx int8 | token-level aggregation `_tokens_to_segments()` | `_map_sensevoice_language()` |
-
-- **Lazy load + cache key**: `(model_size, device, compute_type, language, vad)`; reload only on change.
-- **VAD self-healing**: zero-segment results (music-only) auto-retry with VAD off.
-- **GPU batched inference (v0.1.35)**: whisper builds a `BatchedInferencePipeline` (`batch_size=8`, faster-whisper ≥1.0) when `device=cuda` — 2–4× speed-up; batch failure auto-falls back to sequential in `_run` (`CancelledError` re-raised, never retried). The Qwen3-ASR engine uses qwen-asr's native `List[audio]` batch API in groups of 4 chunks (mismatched result count or any error discards partial output and falls back to chunk-by-chunk; progress event format unchanged).
-- **Idle unload (v0.1.35)**: all three engines implement locked, idempotent `unload()` for pipeline idle recycling.
-- **Qwen chunked inference**: long audio split into 60s chunks, `on_event` reports "chunk i/n"; CPU users of 1.7B get a slow-model warning.
-
-### 4.5 `models.py` — Model Management
-- `default_model_dir()`: `%LOCALAPPDATA%\Bili Note\models`; `resolve_model_dir()` supports custom paths.
-- `scan_models()` / `describe_models()`: engine-specific integrity checks (missing files / version match / single-qwen fallback) driving the Settings "detect models" panel.
-- `find_{whisper,qwen_asr,sensevoice}_model()`: locate a model inside the dir; online downloads land in the same dir via `download_root`.
-
-### 4.6 `gpu_runtime.py` — External GPU Pack
-- Detects CUDA DLLs (cudnn/cublas/cufft…, 17 files) under `%LOCALAPPDATA%\Bili Note\gpu`, registers via `add_dll_directory` + PATH injection so ctranslate2 can load them.
-- `ensure_gpu_or_cpu()`: silently falls back to CPU when the pack is absent.
-
-### 4.7 `keyframes.py` — Keyframe Extraction (dual backend)
-- **ffmpeg (preferred)**: `select='gte(scene,0)'` + `metadata=print` streams per-frame scores (threshold 0.11), snapshots via `-ss`; per-frame callbacks support progress/cancel.
-- **PyAV (fallback)**: 64x36 grayscale MAD > 15 marks a cut.
-- Common policy: first frame always captured; 0.4s after each cut; 5s min gap; cap 400 frames; `KeyframeError` and user cancellation propagate without fallback.
-
-### 4.8 `store.py` — Storage
-- **SQLite** (`data/history.db`): history index, UPSERT keyed by `media_id`.
-- **JSON** (`data/settings.json`) 14 keys: `output_dir / model_size / device / compute_type / language / keep_audio / vad / notes / engine / model_dir / cookies_from_browser / cookie_file / proxy`.
-
-## 5. Data Flow
-
-```
-URL → downloader.probe (platform routing + short-link expansion)
-      └─ for entry in entries (WORKERS=2 concurrent):
-           1. download → audio_path          # skipped on cache hit
-           2. to_wav16k_mono → wav_path      # skipped on cache hit
-           3. transcriber.transcribe(wav)    # serialized by engine lock; GPU first
-           4. (notes) keyframes → writers.write_notes_md
-           5. writers.write_srt/txt/md
-           6. cleanup intermediates           # failure degrades to warning
-           └─ store.update(job: done)
-UI thread polls Store every 0.6s + drains event deque → refresh
-```
-
-## 6. Threading Model
-
-```
-┌─────────────┐     Store/DB      ┌──────────────────┐
-│  UI thread  │ ── read-only ───▶ │   SQLite + JSON   │
-│ (NiceGUI)   │ ◀─ event deque ── │   (Store)        │
-└─────────────┘                   └──────────────────┘
-                                        ▲ write-only
-┌────────────────────────┐              │
-│ WORKERS=2 workers      │ ─────────────┘
-│  download/convert overlap │
-│  transcribe serial (engine lock) │
-└────────────────────────┘
-```
-
-Workers only write Store/events; UI only reads via polling — no shared mutable state, no races. GPU-heavy transcription is serialized by the engine lock to avoid VRAM contention and OOM.
-
-## 7. Packaging Compatibility (PyInstaller pitfalls)
-
-| Issue | Mitigation |
-|-------|------------|
-| transformers misdetects sklearn → GenerationMixin import crash | spec `excludes=["sklearn"]` + runtime hook `preload_transformers.py` sets `_sklearn_available=False` |
-| nagisa bare import `prepro` (PEP366) fails | hook inserts the nagisa package dir into `sys.path` (never `import nagisa.prepro` — circular import); hiddenimports add `nagisa/dynet/_dynet` |
-| Sandbox safe-delete hook kills PyInstaller cleanup | `release.py` `_evacuate()` renames old dist/build dirs aside first so `--noconfirm` finds nothing to delete |
-| onefile native window white screen | browser mode default; `BILI_FORCE_NATIVE=1` to opt in |
-| CUDA DLL location | `__init__.py` frozen-mode `sys._MEIPASS` search paths + `gpu_runtime` external-pack registration |
-
-## 8. Build & Release
-
-### 8.1 Versioning
-- **Single source**: `version` in `pyproject.toml`.
-- `scripts/release.py` bumps and syncs **three** locations: `build/installer.iss` `AppVersion`, `app/__init__.py` `APP_VERSION` (consistency asserted in tests).
-
-### 8.2 Five Artifacts
-| Artifact | Output |
-|----------|--------|
-| Wheel | `dist/bili_transcriber-{ver}-py3-none-any.whl` |
-| Portable | `dist/bili-transcriber-portable-{ver}.zip` (full onedir, ~6900 files) |
-| Setup | `dist/bili-transcriber-setup-{ver}.exe` (InnoSetup) |
-| Single-file | `dist/bili-transcriber-single-{ver}.exe` (onefile, CPU mode) |
-| GPU pack | `dist/bili-transcriber-gpu-{ver}.zip` (17 CUDA DLLs → %LOCALAPPDATA%) |
-
-In-process verification: zip `testzip`, PE header (MZ/PE), and `_built_fresh()` timestamp guard against stale artifacts.
-
-### 8.3 Commands
-```powershell
-python scripts/release.py            # bump + all artifacts
-python scripts/release.py --wheel-only
-python scripts/release.py --single-only
-python scripts/release.py --setup-only
-```
-
-## 9. Testing
-
-`tests/` contains **21 files / 243 cases** (all green at v0.1.34):
-
-| Area | Files (examples) | Strategy |
-|------|------------------|----------|
-| Storage | test_store.py | real temp SQLite |
-| Download | test_downloader.py / test_kuaishou.py | mock yt-dlp / SSR HTML fixtures |
-| Engines | test_transcriber / test_qwen_transcriber / test_sensevoice_transcriber | FakeModel injection; **concurrent load() regression** (Barrier(2), asserts single load) |
-| Pipeline | test_pipeline.py | FakeDownloader/FakeTranscriber at external boundaries |
-| UI | test_ui.py / test_main_helpers.py | NiceGUI user_plugin; `_first_arg`/explorer quoting |
-| Packaging | test_nagisa_ascii.py etc. | runtime hook & compatibility |
-| Notes | test_keyframes.py / test_writers.py | dual-backend threshold calibration & output content |
-
-Run: `.venv\Scripts\pytest -q`
-
-## 10. Known Limitations
-
-- Windows-only verified; macOS/Linux untested (pywebview native window and comdlg32 are Windows-specific).
-- GPU acceleration covers the whisper engine (ctranslate2) only; Qwen3-ASR/SenseVoice run on CPU (Qwen slower).
-- In restricted sandboxes, PyInstaller re-runs may be blocked by safe-delete policies; final exe builds require a normal desktop environment.
-- The Kuaishou SSR parser depends on the share-page markup; site redesigns require updating `app/kuaishou.py`.
-
+> For developers and maintainers. Covers layering, the concurrency model, the state machine, module responsibilities, data contracts, security boundaries, packaging pitfalls, and the test suite.
+> This manual matches **v0.1.39** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [technical-manual-en-0.1.39.md](technical-manual-en-0.1.39.md).
 
 ---
 
-## 11. Companion Skills Repo & Universality Design
+## Table of Contents
 
-The companion open-source repo `Asaceoo/bili-note-skills` owns the knowledge-building stage after transcription, and is orthogonal to this project in responsibility:
+1. [Overview](#1-overview)
+2. [Layered Architecture](#2-layered-architecture)
+3. [Tech Stack](#3-tech-stack)
+4. [Directory Layout](#4-directory-layout)
+5. [Concurrency and Threading](#5-concurrency-and-threading)
+6. [State Machine and Task Recovery](#6-state-machine-and-task-recovery)
+7. [Module Responsibilities](#7-module-responsibilities)
+8. [Data Contracts](#8-data-contracts)
+9. [Security and Robustness](#9-security-and-robustness)
+10. [Packaging Pitfalls](#10-packaging-pitfalls)
+11. [Build and Release](#11-build-and-release)
+12. [Test Suite](#12-test-suite)
+13. [Known Limitations](#13-known-limitations)
 
-| Project | Responsibility boundary | Stack |
+---
+
+## 1. Overview
+
+bili-transcriber is a **fully local multi-platform video/audio transcriber** with three drivers (GUI / CLI / MCP) sharing one service layer.
+
+Core pipeline:
+
+```
+Input: a link (Bilibili/Douyin/Xiaohongshu/Kuaishou/YouTube) or a local media file
+  → Probe & expand (platform detection / short-link resolution / single·multi·collection → N tasks)
+  → Download the best audio stream (video stream instead when notes are enabled)
+  → FFmpeg → 16 kHz mono WAV
+  → Local inference (faster-whisper / Qwen3-ASR / SenseVoice)
+  → Optional: keyframe extraction → illustrated notes
+  → Write SRT / TXT / Markdown
+```
+
+**Design principles applied throughout:**
+
+| Principle | Implementation |
+|---|---|
+| Nothing is uploaded | No external AI API calls; only video fetching and model downloading egress |
+| Resumable | Audio / WAV / video path caching; leftover in-progress tasks resumed at startup |
+| No GPU contention | Transcription holds an engine lock for its whole duration |
+| UI decoupled from compute | Workers only write Store / event queue; the UI thread only polls |
+| Single source of truth | Version lives only in `pyproject.toml`; status sets only in `pipeline.py` |
+
+---
+
+## 2. Layered Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Driver layer                                            │
+│  app/main.py (GUI)   app/cli.py (CLI)   app/mcp_server.py │
+└───────────────┬──────────────┬───────────────┬───────────┘
+                │              │               │
+                │       ┌──────┴───────┐       │
+                │       │ app/headless │◀──────┘  Service layer (sole business entry)
+                │       │   Service    │
+                │       └──────┬───────┘
+                ▼              ▼
+┌──────────────────────────────────────────────────────────┐
+│  Orchestration  app/pipeline.py (Task / state machine /   │
+│                 worker pool)                              │
+└──────────────────────────────────────────────────────────┘
+                │
+┌───────────────┴──────────────────────────────────────────┐
+│  Capability layer                                        │
+│  downloader / kuaishou / converter / transcriber /       │
+│  qwen_transcriber / sensevoice_transcriber / keyframes /  │
+│  writers / models / gpu_runtime / hardware / ffmpeg_bin   │
+└──────────────────────────────────────────────────────────┘
+                │
+┌───────────────┴──────────────────────────────────────────┐
+│  Foundation  paths / store / task_control / native_dialog /│
+│              tray / logging_setup                         │
+└──────────────────────────────────────────────────────────┘
+```
+
+**CLI and MCP never touch `pipeline` directly** — everything goes through `Service` in `app/headless.py`. Consequences:
+
+- Both AI channels behave identically; only transport differs.
+- Argument validation, JSON serialization, and error wrapping exist in exactly one place.
+- Adding a channel (HTTP, message queue) requires no business-logic changes.
+
+---
+
+## 3. Tech Stack
+
+| Layer | Choice |
+|---|---|
+| Language | Python ≥ 3.11 (dev on 3.14) |
+| Download | yt-dlp (Bilibili / Douyin / Xiaohongshu / YouTube) + custom Kuaishou SSR parser |
+| Transcode | FFmpeg via subprocess; bundled imageio-ffmpeg static build resolved by `app/ffmpeg_bin.py` |
+| Engine 1 | faster-whisper + ctranslate2 (CUDA backend, default) |
+| Engine 2 | qwen-asr (Qwen3-ASR 0.6B / 1.7B, torch backend) |
+| Engine 3 | sherpa-onnx (SenseVoiceSmall, ONNX int8) |
+| Keyframes | FFmpeg scene detection (primary) / PyAV frame-diff MAD (fallback) |
+| UI | NiceGUI (Quasar components), browser mode by default; pywebview optional |
+| Tray | pystray (silent degradation on failure) |
+| Native dialog | ctypes comdlg32 |
+| Single instance | ctypes `CreateMutexW` |
+| Storage | SQLite (`history.db`) + JSON (`settings.json`) |
+| Build | hatchling (wheel) + PyInstaller (onedir / onefile) + InnoSetup |
+
+---
+
+## 4. Directory Layout
+
+```
+bili-transcriber/
+├── app/                        # 28 modules, ~6700 lines
+│   ├── __init__.py             # APP_VERSION + frozen-mode DLL search path
+│   ├── paths.py                # Runtime path resolution (GUI/CLI/MCP share one data/)
+│   ├── main.py                 # Entry: single instance / port / tray / UI wiring
+│   ├── pipeline.py             # Orchestration: state machine / workers / model lock
+│   ├── headless.py             # Service layer: sole business entry for CLI and MCP
+│   ├── cli.py                  # CLI driver
+│   ├── mcp_server.py           # MCP stdio server (JSON-RPC 2.0 subset)
+│   ├── downloader.py           # Download orchestration: platform / short links / cookies
+│   ├── kuaishou.py             # Kuaishou share-page SSR parser
+│   ├── converter.py            # FFmpeg → 16 kHz mono WAV
+│   ├── transcriber.py          # Engine 1: faster-whisper
+│   ├── qwen_transcriber.py     # Engine 2: Qwen3-ASR (chunked + aligner)
+│   ├── sensevoice_transcriber.py # Engine 3: SenseVoice (token→segment timestamps)
+│   ├── keyframes.py            # Keyframe extraction (ffmpeg scene / PyAV)
+│   ├── writers.py              # SRT / TXT / MD / notes writers (atomic)
+│   ├── models.py               # Model dir scan / validate / locate
+│   ├── gpu_runtime.py          # External GPU pack DLL registration
+│   ├── ffmpeg_bin.py           # ffmpeg binary resolution (PATH first, bundled fallback)
+│   ├── hardware.py             # Hardware probe (GPU model / VRAM / CUDA)
+│   ├── store.py                # SQLite + JSON settings (14 keys)
+│   ├── task_control.py         # Per-task pause / cancel (thread-safe)
+│   ├── native_dialog.py        # Windows native file dialog (ctypes comdlg32)
+│   ├── tray.py                 # System tray (pystray, silent fallback)
+│   ├── logging_setup.py        # Logging bootstrap
+│   └── ui/
+│       ├── state.py            # Shared singletons: store / settings / pipeline / events
+│       ├── pages.py            # Tab layout construction
+│       └── helpers.py          # Action functions: open folder / task ops / upload
+├── build/
+│   ├── bili-transcriber.spec         # PyInstaller onedir
+│   ├── bili-transcriber-onefile.spec # PyInstaller onefile
+│   ├── preload_transformers.py       # Runtime hook (transformers / nagisa compat)
+│   ├── installer.iss                 # InnoSetup script
+│   └── smoke_*.py / verify_*.py      # Packaging smoke and verification
+├── scripts/
+│   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
+│   ├── e2e_check.py            # End-to-end link check
+│   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
+├── tests/                      # pytest (24 files / 344 cases)
+├── docs/                       # Bilingual manuals + assets/ concept art
+├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
+├── output/                     # Transcription output (runtime)
+└── pyproject.toml              # Version single source
+```
+
+---
+
+## 5. Concurrency and Threading
+
+### 5.1 Three tiers
+
+```
+┌──────────────┐   Store / SQLite      ┌──────────────────┐
+│  UI thread   │ ─── poll every 0.6s ▶ │  SQLite + JSON   │
+│  (NiceGUI)   │ ◀── event deque ───── │     (Store)      │
+└──────────────┘     maxlen=200        └──────────────────┘
+                                              ▲ write only
+┌─────────────────────────────┐               │
+│  Worker pool (2 default, 1–6)│ ──────────────┘
+│  download / convert overlap  │
+│  transcribe serial (lock)    │
+└─────────────────────────────┘
+```
+
+### 5.2 Why downloads parallelize but transcription does not
+
+Download and transcode are mixed I/O and CPU work — running several in parallel raises throughput meaningfully: while task A transcribes, task B downloads; when A finishes, B's audio is ready.
+
+Transcription must be serial: several tasks pushing into one GPU exhaust VRAM and trigger `CUDA out of memory`, failing everything. Serial is better for aggregate throughput too.
+
+### 5.3 Three locks
+
+| Lock | Location | Protects |
 |---|---|---|
-| bili-transcriber (this project) | link → audio → local ASR → subtitle/transcript files | Python desktop app (NiceGUI + PyInstaller) |
-| bili-note-skills (companion) | transcript → archive / 6 learning artifacts → quality gate | Python stdlib scripts + Node gate script + Markdown instructions |
+| `_model_lock` | `Pipeline` | Lazy init / replacement of `_transcriber` (rebuilt on settings change) |
+| engine `self._lock` | each transcriber | Serializes `transcribe()` so only one task owns the model/VRAM |
+| double-checked lock | each engine's `load()` | Null-check and load happen atomically, preventing double load on cold start |
 
-**Universality contract (v1.1.0)** for downstream developers:
+`_model_lock` is held only briefly while acquiring an engine reference; an in-flight transcription holds its own reference, so a settings change cannot interrupt a running task.
 
-1. **Single entry point**: one `SKILL.md` per skill with standard frontmatter (`name` + `description`) and plain-Markdown instructions — no platform-specific fields.
-2. **Zero third-party dependencies**: `bili-note` scripts use Python 3.10+ stdlib only; `bili-content-enhance/scripts/validate.js` uses Node built-ins only (`vm` / `fs` / `path`).
-3. **Path auto-detection**: no hardcoded agent directories; PowerShell and bash snippets both probe common skill dirs and fall back to a manual absolute path.
-4. **Browser channel abstracted to a CDP interface**: the logged-in route only needs `GET <cdp-base>/targets` and `GET <cdp-base>/eval?target=<id>` (default `http://localhost:3456`, overridable via `--cdp-base`); WorkBuddy `web-access` is just one implementation.
-5. **CI validation**: `.github/workflows/validate.yml` checks frontmatter completeness, absence of `__pycache__` / `.bak` leftovers, no hardcoded credentials, and no leaked machine-specific absolute paths.
-6. **De-branded tests**: assertions target the generic contract (CDP, `--cdp-base`, cross-platform compatibility section) instead of any specific vendor or browser.
+### 5.4 Queue de-duplication
 
-When chaining with this project, the transcript file (`.md` / `.txt` / `.srt`) is the only data contract; the skills never read this project's database, and this project never depends on the skills repo.
+```python
+self._scheduled: set[str] = set()   # media_id currently in queue
+```
+
+- `_enqueue(task)` is the single enqueue point and `add`s the id.
+- Workers `discard` when they pick the task up (no longer "in queue").
+- All three enqueue sites (`submit_local`, `submit_prepared`, `rerun`) go through `_enqueue`.
+
+**Real bug this fixed**: `submit_prepared` → `start()` plus `submit_prepared`'s own enqueue meant double enqueueing; two workers processed the same media_id, one deleted the wav and the other died with `FileNotFoundError`. `_scheduled` is the sole arbiter now.
+
+### 5.5 Single-instance guard
+
+Two processes working the same queue delete each other's intermediates. The guard:
+
+```python
+name = f"Local\\bili-transcriber-{sha1(str(DATA_DIR))[:12]}"
+h = ctypes.windll.kernel32.CreateMutexW(None, False, name)
+if ctypes.get_last_error() == ERROR_ALREADY_EXISTS (183):
+    webbrowser.open(existing_url)   # point the user at the running window
+    return                          # exit quietly
+```
+
+The name includes a hash of `DATA_DIR`, so **different data directories can run concurrently** (e.g. a stable build and a test build); the same directory is mutually exclusive.
+
+### 5.6 Idle model unload
+
+`MODEL_IDLE_UNLOAD_SEC = 600`. When the queue is empty and no task has run for 10 minutes, the model is unloaded to free VRAM/RAM. The next submission reloads lazily — the only cost is one cold start.
+
+Irrelevant for one-shot CLI processes; saves ~1.6 GB on a long-running desktop instance.
+
+---
+
+## 6. State Machine and Task Recovery
+
+### 6.1 Status sets (single source of truth)
+
+```python
+# app/pipeline.py
+ACTIVE_STATUSES = frozenset({
+    "queued", "downloading", "converting", "transcribing",
+    "extracting", "saving", "paused",
+})
+TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
+```
+
+`app/ui/state.py` imports and re-exports them. Previously both files defined their own copies; updating one and forgetting the other silently drifted the "in progress" judgment. Now that is physically impossible.
+
+### 6.2 Transitions
+
+```
+queued
+  └→ downloading ──→ converting ──→ transcribing ──┬→ saving → done
+                                     │              │
+                                     └→ extracting ─┘   (notes enabled)
+                     any stage ──→ failed / cancelled
+                     any stage ──→ paused ──→ (resume) back to prior stage
+```
+
+### 6.3 Startup recovery
+
+`Pipeline.start()` doesn't just spin up workers — it resumes leftovers:
+
+```python
+for job in self.store.list_jobs():
+    if job.media_id in self._scheduled:      # already queued, skip
+        continue
+    if job.status not in ACTIVE_STATUSES:    # only in-progress ones
+        continue
+    job.status, job.progress, job.error, job.finished_at = "queued", 0.0, "", ""
+    self.store.upsert_job(job)
+    self._enqueue(Task(kind=..., url=job.url, media_id=job.media_id))
+    recovered += 1
+```
+
+**Why every `ACTIVE_STATUSES` value matters, not just queued/paused**: a real test showed that after `--no-wait` the CLI process exited and the task sat at `transcribing` forever, ignored by the desktop app. Covering all in-progress states made the same scenario resume successfully.
+
+### 6.4 Semantics of a repeated submission
+
+When `submit_prepared` / `submit_local` sees a media_id already in flight, it does **not** re-enqueue and returns:
+
+```python
+{"media_id": ..., "title": ..., "status": "running", "stage": <current status>}
+```
+
+Callers (CLI / MCP / UI) can therefore distinguish "newly accepted" from "already running". This is also the first gate against two workers competing for one task.
+
+---
+
+## 7. Module Responsibilities
+
+### 7.1 `paths.py` — path resolution
+
+```python
+def app_root() -> Path   # frozen = exe directory; source = project root
+def data_dir() -> Path   # app_root()/data
+```
+
+**CLI / MCP must resolve to the same `data/` as the GUI**, otherwise AI calls read and write a second, independent database and cannot see desktop history or settings.
+
+### 7.2 `main.py` — startup and UI wiring
+
+`main()` order (the order is the correctness):
+
+1. `setup_logging()`
+2. Resolve port (`BILI_PORT`, default 8765)
+3. **Single-instance check** → on failure `webbrowser.open(existing_url)` then `return`
+4. `pipeline.start()` (including leftover recovery)
+5. Tray, UI, browser open
+
+The single-instance check must precede `pipeline.start()` — otherwise the second process would first mark tasks as queued and then get evicted, leaving dirty state.
+
+The UI thread polls `Store` every **0.6 s** and drains an event `deque(maxlen=200)`.
+
+### 7.3 `pipeline.py` — orchestration
+
+| Method | Responsibility |
+|---|---|
+| `submit(url)` | Submit a link (probes internally, delegates to `submit_prepared`) |
+| `submit_local(path)` | Submit a local file (content hash as media_id) |
+| `submit_prepared(entries)` | Submit probed entries, returning per-entry acceptance |
+| `_enqueue(task)` | The only enqueue point; maintains `_scheduled` |
+| `rerun(media_id)` | Reset status and re-enqueue |
+| `pause/resume/cancel` | Delegates to `task_control` |
+| `apply_settings(settings)` | Hot-apply settings; rebuilds the pool when worker count changes |
+| `prewarm()` | Load the model on a background thread |
+| `maybe_unload_model()` | Idle unload |
+| `stalled(media_id)` | Stuck detection (default: no progress for 60 s) |
+
+### 7.4 `headless.py` — service layer
+
+Public API: `submit` / `status` / `list_jobs` / `wait` / `transcript` / `cancel` / `prewarm` / `get_settings` / `set_settings` / `close`.
+
+**Three key designs:**
+
+**① `json_safe(value)`** — recursively converts `NaN` / `±Infinity` to `None`. Every outbound JSON passes through it with `json.dumps(..., allow_nan=False)`. The default `allow_nan=True` emits bare `NaN`, which breaks `JSON.parse` on the JS side.
+
+**② `_validate_settings(changes)`** — whitelist checks on `engine` / `device` / `compute_type`, and a **write probe** for `output_dir` (actually creates the directory and writes a temp file). Hard errors raise `ServiceError`; a missing `cookie_file` / `model_dir` only yields a warning (they may be created later).
+
+**③ `_has_orphan(ids)`** — inside `wait()` it detects "no live workers + empty queue + queued tasks exist" and returns `{"stalled": True, "hint": ...}` instead of blocking until timeout. This matches the real case of "the CLI submitted a task but this process isn't scheduling it".
+
+### 7.5 `cli.py` — command line
+
+**Encoding adaptation (important)**:
+
+```python
+def _dump_json(payload, indent=2):
+    safe = json_safe(payload)
+    text = json.dumps(safe, ensure_ascii=False, indent=indent, allow_nan=False)
+    try:
+        text.encode(_stream_encoding())      # can stdout represent this?
+    except (UnicodeEncodeError, LookupError):
+        text = json.dumps(safe, ensure_ascii=True, indent=indent, allow_nan=False)
+    return text
+```
+
+`_write()` adds a `backslashreplace` safety net.
+
+**Why this is mandatory**: a PyInstaller `console=False` exe reuses the parent's pipes, so `sys.stdout.encoding` is the system ANSI code page — **GBK** on Chinese Windows. `print('🎉')` then raises `UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f389'` and the CLI crashes at the last step.
+
+Test with `PYTHONIOENCODING=gbk` and verify the output is still valid JSON (ASCII escapes parse fine).
+
+### 7.6 `mcp_server.py` — MCP server
+
+Hand-written JSON-RPC 2.0 subset; no third-party SDK (smaller bundle, fewer dependency risks).
+
+Methods: `initialize` / `tools/list` / `tools/call` / `notifications/initialized` / `ping`.
+
+**Four robustness measures:**
+
+| Problem | Handling |
+|---|---|
+| Unreliable arg types (AI clients send `limit` as a string) | `_arg_int` / `_arg_num` / `_pick` coercion |
+| Client sends a batch (JSON array) | Run `handle()` per item and **flatten** into one response array |
+| NaN in results | `_tool_result()` applies `json_safe` + `allow_nan=False` |
+| Started without pipes (stdin/stdout are None) | `_reopen_null_streams()` logs and returns `False` → `main()` returns 1 |
+
+That last one matters: under `console=False` with no pipes, `sys.stdin` is `None` and a raw `readline()` dies with a confusing `AttributeError`. Now it's an explicit log line plus a non-zero exit code.
+
+### 7.7 `downloader.py` — download orchestration
+
+- **Platform detection** by domain: `bilibili / youtube / douyin / xiaohongshu / kuaishou`; unknown domains treated as Bilibili-compatible. media_id prefixes: `yt_` / `dy_` / `xhs_` / `ks_`.
+- **Short-link safety**: b23.tv and friends pass a **domain allowlist** plus **DNS-rebinding protection** (resolved IP re-check) before redirects are followed.
+- **Cookies / proxy**: `cookiefile` (cookies.txt) takes precedence over `cookiesfrombrowser`; browser names outside `SUPPORTED_BROWSERS` are ignored to avoid YoutubeDL constructor errors.
+- **Reachability cache**: `_reach_cache` is invalidated when the proxy changes.
+- **WeChat Channels are rejected intentionally** — no login-free direct stream exists; the UI is told to use local upload instead of attempting a doomed download.
+
+### 7.8 Three engines
+
+| Module | Backend | Timestamp strategy | Language mapping |
+|---|---|---|---|
+| `transcriber.py` | faster-whisper / ctranslate2 | Native | whisper codes |
+| `qwen_transcriber.py` | qwen-asr (torch) + ForcedAligner | Aligner; falls back to duration-based estimation | `_map_qwen_language()` whisper→full name, unknown → auto |
+| `sensevoice_transcriber.py` | sherpa-onnx int8 | Token-level timestamps aggregated by `_tokens_to_segments()` | `_map_sensevoice_language()` |
+
+Shared behavior:
+
+- **Lazy load + cache key** `(model_size, device, compute_type, language, vad)`; reload only when it changes.
+- **VAD self-healing**: when Silero VAD filters out all speech (music), retry once with VAD disabled.
+- **Qwen chunking**: long audio split into 60 s chunks with `on_event` reporting "chunk i/n".
+
+### 7.9 `writers.py` — output writing
+
+```python
+def _write_text_retry(path, text, attempts=6):
+    tmp = path.with_name(f".{path.name}.tmp")
+    for i in range(attempts):
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)      # atomic replace
+            return path
+        except PermissionError:
+            time.sleep(0.2 * (i + 1))  # linear backoff
+    raise
+```
+
+Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real problems solved: antivirus briefly locking the directory, and the user having the file open elsewhere. **You never get a truncated file.**
+
+### 7.10 `models.py` / `gpu_runtime.py`
+
+- `default_model_dir()` → `%LOCALAPPDATA%\Bili Note\models`; `resolve_model_dir()` honors a custom path.
+- `scan_models()` / `describe_models()` validate completeness per engine's characteristic files, driving the "Check models" button.
+- `gpu_runtime` locates 17 CUDA DLLs under `%LOCALAPPDATA%\Bili Note\gpu` using the `nvidia/{cublas,cudnn,cuda_runtime,cuda_nvrtc}/bin/` layout (`_dll_root()` probes for `cublas64_12.dll`, and tolerates a flat layout), then injects both `add_dll_directory` and PATH before ctranslate2 can load.
+  - **Why both injections matter**: ctranslate2 is built with `CUDA_DYNAMIC_LOADING=ON`; lazy cuBLAS loading bypasses Windows safe-search mode, so `add_dll_directory` alone makes ctypes succeed while transcription still fails.
+  - **Handles must stay alive**: once a handle from `add_dll_directory` is GC'd the search path vanishes, showing up as "model loaded fine, then died during transcription" — hence `_dll_handles` keeps them forever.
+  - **Idempotent registration**: `_registered_dirs` stops every transcription from re-prepending PATH and growing it without bound.
+- `ensure_gpu_or_cpu()` falls back to CPU silently when the pack is absent, and pre-validates `ctypes.WinDLL("cublas64_12.dll")` so failures surface at detection time, not mid-transcription.
+
+### 7.11 `keyframes.py` — dual backend
+
+| Backend | Detection | When |
+|---|---|---|
+| ffmpeg (primary) | `select='gte(scene,0)'` + `metadata=print`, threshold 0.11 | Fast, almost always works |
+| PyAV (fallback) | 64×36 grayscale MAD > 15 | When ffmpeg is unavailable |
+
+Shared policy: always capture the first frame; capture 0.4 s after a cut; minimum 5 s interval; cap at 400 frames. `KeyframeError` and user cancellation propagate instead of falling back.
+
+### 7.12 The `ui/` trio
+
+- `state.py` — creates singletons at first module import (store / settings / pipeline / events), matching pre-split `main.py` behavior.
+- `pages.py` — four-tab layout.
+- `helpers.py` — pure action functions, no layout; UI-level names like `_launch_explorer` are monkeypatchable in tests.
+
+**Table row event gotcha**: after NiceGUI `$emit('open-path', path)`, `e.args` is a list `[path]` and must be unwrapped by `_first_arg(e)`. The explorer call `/select,"path"` needs quotes or paths with spaces get truncated.
+
+---
+
+## 8. Data Contracts
+
+### 8.1 Settings (14 keys)
+
+```jsonc
+{
+  "output_dir": "output",         // relative to app_root, or absolute
+  "model_size": "large-v3-turbo",
+  "device": "auto",               // auto / cuda / cpu
+  "compute_type": "auto",         // auto / float16 / int8_float16 / int8
+  "language": "",                 // empty = auto
+  "keep_audio": true,
+  "vad": true,
+  "notes": false,
+  "engine": "whisper",            // whisper / qwen3-asr / sensevoice
+  "model_dir": "",                // empty = default dir
+  "cookies_from_browser": "",
+  "cookie_file": "",
+  "proxy": "",
+  "workers": 2                    // 1–6
+}
+```
+
+### 8.2 Job record (SQLite `jobs`)
+
+Primary key `media_id`, UPSERTed. Fields: `media_id` / `url` / `title` / `status` / `progress` / `error` / `source_type` / `output_dir` / `created_at` / `finished_at`.
+
+`source_type` decides whether recovery enqueues a `local` or `prepared` task — **recovering as `prepared` rather than `url`** prevents a multi-part video from being re-probed as a whole batch and dragging the single part the user wanted back into the queue.
+
+### 8.3 Output Directory and Filename Rules
+
+Two places own the whole naming scheme; changing either affects every artifact:
+
+**Directory** (`Pipeline._job_dir`):
+
+```python
+folder = info.playlist_title or info.title           # collections prefer the overall title
+name = _safe_name(folder) if not info.bv else f"{info.bv}_{_safe_name(folder)}"
+if unique_suffix:                                     # local jobs de-dup via media_id
+    name = f"{name}_{_safe_name(unique_suffix)}"
+```
+
+- `info.bv` comes from `_bilibili_id()`, which takes the part before the underscore — **the `_p2` suffix is already stripped** — so every part of a collection lands in the same directory.
+- Local files have an empty `info.bv` and pass `unique_suffix = media_id` (`local_<sha1>`), so the directory is `{filename}_{hash}` and same-named files with different content never collide.
+
+**Filename stem** (`downloader.output_stem`):
+
+```python
+stem = _safe_name(info.title) or info.media_id
+if info.total_parts > 1:
+    stem = f"{stem}_P{info.part:02d}"
+```
+
+`_P01` is appended only when `total_parts > 1`, because part titles inside a collection often repeat and would otherwise overwrite each other. Single-part videos keep the plain title for backward compatibility.
+
+`_safe_name()` replaces `<>:"/\|?*` with `_`, trims trailing spaces and dots, and truncates to 80 characters.
+
+### 8.4 Service Responses
+
+```jsonc
+// submit
+{"accepted": 2, "running": 1, "skipped": 1, "jobs": [{"media_id": "...", "status": "queued"}]}
+
+// wait
+{"state": "done", "done": 3, "failed": 0, "jobs": [...], "waited_sec": 12.4}
+
+// wait (abnormal)
+{"state": "stalled", "stalled": true, "hint": "task is queued but this process isn't scheduling it..."}
+
+// transcript
+{"media_id": "...", "format": "md", "chars": 4123, "truncated": false, "text": "..."}
+```
+
+---
+
+## 9. Security and Robustness
+
+| Risk | Mitigation |
+|---|---|
+| SSRF / DNS rebinding (short links) | Domain allowlist + resolved-IP re-check before following redirects |
+| Filename injection | `_safe_name()` strips illegal characters and truncates |
+| Bad settings crashing startup | Whitelist validation + output-dir write probe on save |
+| Truncated outputs / write failures | Atomic writes + `PermissionError` backoff |
+| Breaking JS `JSON.parse` | `json_safe` + `allow_nan=False` on every outbound payload |
+| Packaged-exe encoding crash | stdout encoding probe + `ensure_ascii` fallback + `backslashreplace` |
+| Two processes racing one task | `CreateMutexW` single instance + `_scheduled` de-duplication |
+| Zombie tasks | Startup recovery over all `ACTIVE_STATUSES` + `wait()` stalled detection |
+| Cookie leakage | Cookies go only to yt-dlp during download; never logged or packaged |
+| Destructive scans/deletes | `scripts/bdelete/` tools require explicit paths; no wildcard deletion |
+
+---
+
+## 10. Packaging Pitfalls
+
+| Problem | Mitigation |
+|---|---|
+| transformers mis-detects sklearn → `GenerationMixin` import crash | Spec `excludes=["sklearn"]` + `preload_transformers.py` hook setting `_sklearn_available=False` |
+| nagisa bare-imports `prepro` (PEP 366 failure) | Hook inserts the nagisa package dir into `sys.path` (importing `nagisa.prepro` causes a circular import); hiddenimports add `nagisa/dynet/_dynet` |
+| Sandbox safe-delete hook blocks PyInstaller cleanup | `release.py` calls `_evacuate()` to rename old dist/build aside so `--noconfirm` has nothing to delete |
+| onefile native window shows blank | Browser mode is default; `BILI_FORCE_NATIVE=1` opts in explicitly |
+| CUDA DLL resolution | `__init__.py` injects `sys._MEIPASS` into the search path in frozen mode; `gpu_runtime` registers the external pack |
+| **Windowed exe stdout is GBK** | CLI encoding probe + `ensure_ascii` fallback; log handler skipped when `sys.stderr is None` |
+| **`console=False` leaves stdin/stdout as None** | `logging_setup` null-guards; MCP `_reopen_null_streams()` fails explicitly instead of `AttributeError` |
+| NiceGUI `multiprocessing` re-imports the module | Check `multiprocessing.current_process().name` to avoid building the UI in children |
+
+---
+
+## 11. Build and Release
+
+### 11.1 Version single source
+
+`pyproject.toml`'s `version` is the only truth. `release.py` synchronizes:
+
+1. `app/__init__.py`'s `APP_VERSION`
+2. `build/installer.iss`'s `AppVersion`
+3. **The four manuals' header declarations** + versioned snapshot generation
+4. **The README header** (rolling only, no snapshot)
+
+`tests/` asserts three-way version consistency, so a missed sync fails the suite.
+
+### 11.2 Five artifacts
+
+| Artifact | Output |
+|---|---|
+| Wheel | `dist/bili_transcriber-{ver}-py3-none-any.whl` |
+| Portable | `dist/bili-transcriber-portable-{ver}.zip` (full onedir, ~6900 files) |
+| Installer | `dist/bili-transcriber-setup-{ver}.exe` (InnoSetup) |
+| Single-file | `dist/bili-transcriber-single-{ver}.exe` (onefile, CPU) |
+| GPU pack | `dist/bili-transcriber-gpu-{ver}.zip` (17 CUDA DLLs) |
+
+Artifact checks: zip `testzip()`, PE headers (`MZ` / `PE`), and `_built_fresh()` timestamps to prevent shipping stale builds.
+
+### 11.3 Commands
+
+```powershell
+python scripts/release.py               # bump + five artifacts + doc snapshots
+python scripts/release.py --wheel-only  # fast delivery
+python scripts/release.py --bin-only    # portable + installer only (version already set)
+python scripts/release.py --setup-only  # onedir + installer only
+python scripts/release.py --single-only # rebuild the single-file build only
+```
+
+---
+
+## 12. Test Suite
+
+`tests/` holds **24 files / 344 cases**, green in about 200 seconds.
+
+| Area | Files | Strategy |
+|---|---|---|
+| Storage | `test_store.py` | Real SQLite temp databases |
+| Download | `test_downloader.py` / `test_kuaishou.py` | Mocked yt-dlp / SSR HTML fixtures |
+| Engines | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel injection; **concurrent `load()` regression** (`Barrier(2)` asserts a single load) |
+| Orchestration | `test_pipeline.py` | FakeDownloader / FakeTranscriber at the boundary; covers "no re-enqueue for active tasks", leftover recovery, mid-run kill recovery |
+| Service layer | `test_headless.py` | `running` semantics / stalled detection / prewarm / four settings validations / status aliases |
+| CLI | `test_cli.py` | Argument parsing, JSON output, **GBK stdout regression**, non-integer `--set` |
+| MCP | `test_mcp_server.py` | Handshake, nine tools, bad-arg tolerance, **batch flattening**, **NaN sanitizing** |
+| Writers | `test_writers.py` | Atomic write retries, no truncated files |
+| UI | `test_ui.py` / `test_main_helpers.py` | NiceGUI `user_plugin`; `_first_arg` / explorer quoting |
+| Release | `test_release_docs.py` | Automatic manual version-header sync |
+| Packaging | `test_nagisa_ascii.py` etc. | Runtime hooks and compatibility |
+
+### 12.1 Adversarial review methodology
+
+This project uses three-perspective iterative review:
+
+| Perspective | Focus | Typical output |
+|---|---|---|
+| **Tool implementer** | Edge cases, resource cleanup, encoding, thread safety | `_scheduled` de-dup, atomic writes, encoding fallback |
+| **Reviewer** | Contract consistency, error paths, duplication | `ACTIVE_STATUSES` single source, `json_safe` single exit |
+| **AI consumer** | Are args easy to pass? Are errors readable? Is state decidable? | `running` semantics, stalled hints, `_arg_int` coercion |
+
+The rule: **reproduce a real failure before fixing anything.** Every fix above corresponds to an actual failing run, not a "looks suspicious" hunch.
+
+### 12.2 Running
+
+```powershell
+.venv\Scripts\pytest -q                       # full suite
+.venv\Scripts\pytest tests/test_cli.py -v     # single file
+```
+
+---
+
+## 13. Known Limitations
+
+- **Windows only in practice.** macOS/Linux are untested: `native_dialog` (comdlg32), the single-instance guard (`CreateMutexW`), and `ui/helpers`' explorer calls are Windows-specific. They degrade elsewhere but are unverified.
+- **GPU acceleration covers whisper only** (ctranslate2). Qwen3-ASR runs on torch (GPU helps, different optimization); SenseVoice runs on onnxruntime CPU.
+- **yt-dlp cannot be upgraded inside packaged builds.** Platform API changes require a new release.
+- **The Kuaishou SSR parser depends on share-page structure**; site changes require updating `app/kuaishou.py`.
+- **Sandboxed environments may block PyInstaller rebuilds** via safe-delete policy; final exe builds need full permissions on the host.
+- **MCP implements a JSON-RPC subset only** — no resources, prompts, or sampling.
+- **Keyframe extraction caps at 400 frames**, so very long videos lose some slides.

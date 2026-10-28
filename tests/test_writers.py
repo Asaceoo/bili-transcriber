@@ -113,3 +113,37 @@ def test_write_notes_md_no_url_is_plain_timestamp(tmp_path: Path):
     text = write_notes_md(meta, sections, tmp_path / "n.notes.md").read_text(encoding="utf-8")
     assert "## 第 1 页 · 00:00:02" in text
     assert "](http" not in text
+
+
+def test_atomic_write_retries_on_permission_error(monkeypatch, tmp_path):
+    """Windows 杀软短暂占用产物文件时重试,而不是让整轮转写白跑。"""
+    import os as _os
+    from app import writers as w
+    calls = {"n": 0}
+    real_replace = _os.replace
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError("locked by AV")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(w.os, "replace", flaky)
+    p = w.write_txt([Segment(0.0, 1.0, "你好")], tmp_path / "a.txt")
+    assert p.read_text(encoding="utf-8").strip() == "你好"
+    assert calls["n"] == 3
+
+
+def test_atomic_write_failure_leaves_no_partial_file(tmp_path):
+    """重试耗尽后必须报错且不留半截产物(半截 md 会被当成"已完成")。"""
+    import pytest
+    from app import writers as w
+
+    class Boom:
+        name = "boom.txt"
+
+    target = tmp_path / "boom.txt"
+    target.mkdir()  # 目录占位:os.replace 到目录必然失败
+    with pytest.raises(OSError):
+        w._write_text_retry(target, "x", attempts=2)
+    assert not (tmp_path / ".boom.txt.tmp").exists()

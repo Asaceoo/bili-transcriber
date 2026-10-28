@@ -62,8 +62,43 @@ def _has_webview2() -> bool:
     return False
 
 
+_instance_mutex = None  # 进程存活期间保持句柄,进程退出由 OS 释放
+
+
+def _acquire_single_instance() -> bool:
+    """同一 data 目录只允许一个桌面实例;返回 False 表示已有实例在跑。
+
+    两个实例会各自拉起 pipeline 续跑同一批未完成任务、各自加载一份模型
+    (显存翻倍),并向同一个 SQLite 并发写入 —— 真机已复现:同一条任务被两个
+    实例并行处理,先完成的删掉缓存 wav,后一个随即失败。
+    无界面模式(CLI/MCP)不经过这里:它们本就该与桌面端共享同一份历史。
+    """
+    global _instance_mutex
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        import hashlib
+        from ctypes import wintypes
+
+        name = ("Local\\bili-transcriber-"
+                + hashlib.sha1(str(DATA_DIR).lower().encode("utf-8")).hexdigest()[:12])
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        handle = kernel32.CreateMutexW(None, wintypes.BOOL(False), name)
+        if not handle:
+            return True  # 无法创建互斥体时不做限制,不影响正常使用
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            return False
+        _instance_mutex = handle
+        return True
+    except Exception:  # noqa: BLE001 — 检查失败不应阻断启动
+        logger.exception("单实例检查失败,继续启动")
+        return True
+
+
 def _print_err(msg: str) -> None:
-    """向 stderr 输出诊断信息;PyInstaller 启动早期 sys.stderr 可能为 None。"""
     try:
         if sys.stderr is not None:
             print(msg, file=sys.stderr)
@@ -112,9 +147,52 @@ def _tray_exit() -> None:
         os._exit(0)
 
 
+def _dispatch_headless(argv: list[str]) -> int | None:
+    """识别无界面参数;返回退出码,None 表示继续走 GUI。
+
+    打包版 exe 与 `bili-transcriber` 控制台入口都会经过这里,保证
+    `bili-transcriber --mcp` / `--cli ...` / `--version` 三种写法一致。
+    """
+    if "--mcp" in argv:
+        from app.mcp_server import main as _mcp_main
+        return _mcp_main()
+    if "--cli" in argv:
+        from app.cli import main as _cli_main
+        return _cli_main(argv[argv.index("--cli") + 1:])
+    if argv[:1] == ["--version"]:
+        print(APP_VERSION)
+        return 0
+    return None
+
+
 def main() -> None:
+    code = _dispatch_headless(sys.argv[1:])
+    if code is not None:
+        raise SystemExit(code)
     # 全局日志:文件日志 + 未捕获异常钩子,先于一切业务逻辑初始化
     setup_logging()
+    try:
+        port = int(os.environ.get("BILI_PORT", "8765"))
+    except ValueError:
+        # 环境变量被误设成非数字(如 "abc")时回退默认端口,避免启动即崩溃
+        port = 8765
+    # 单实例:已经有桌面端在跑时不再启动第二份(否则同一任务会被并行处理两次)
+    if not _acquire_single_instance():
+        _print_err("[bili main] 检测到已有实例在运行,打开现有窗口后退出")
+        logger.info("已有实例在运行,本进程退出")
+        try:
+            import webbrowser
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:  # noqa: BLE001 — 打不开浏览器不影响退出
+            pass
+        return
+    # 启动即拉起工作线程:顺带恢复上次会话遗留的"排队中/已暂停/进行中"任务。
+    # 之前只有"提交新任务"才会 start(),关闭应用时排队中的任务没人消费,
+    # 重启后 UI 一直显示排队中,用户只能手动重跑。
+    try:
+        pipeline.start()
+    except Exception:  # noqa: BLE001 — 启动失败不应阻断界面
+        logger.exception("启动任务管道失败")
     if os.environ.get("BILI_TEST_IMPORTS"):
         _test_imports()
     # 默认走浏览器模式:pywebview 在 PyInstaller --onefile 解压环境下原生窗口会白屏,
@@ -146,11 +224,6 @@ def main() -> None:
         f"BILI_NO_BROWSER={os.environ.get('BILI_NO_BROWSER')!r} "
         f"use_native={use_native} show={show}"
     )
-    try:
-        port = int(os.environ.get("BILI_PORT", "8765"))
-    except ValueError:
-        # 环境变量被误设成非数字(如 "abc")时回退默认端口,避免启动即崩溃
-        port = 8765
     # 系统托盘:常驻后台,可"打开主窗口"或"退出"。浏览器模式关闭窗口后服务仍在,
     # 托盘是重新打开窗口/彻底退出的入口。托盘不可用时静默降级,不影响主程序。
     tray = None
@@ -193,4 +266,7 @@ if __name__ in {"__main__", "__mp_main__"}:
         # spawn 子进程初始化失败(如父进程已退出导致 OpenProcess 失败):
         # 静默退出,不弹错误框。
         sys.exit(0)
+
+    # 无界面模式(`--mcp` / `--cli` / `--version`)在 main() 内统一分发,
+    # 打包版 exe 与控制台入口行为一致。
     main()
