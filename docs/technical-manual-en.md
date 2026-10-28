@@ -154,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (24 files / 346 cases)
+├── tests/                      # pytest (24 files / 369 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -221,6 +221,13 @@ if ctypes.get_last_error() == ERROR_ALREADY_EXISTS (183):
 ```
 
 The name includes a hash of `DATA_DIR`, so **different data directories can run concurrently** (e.g. a stable build and a test build); the same directory is mutually exclusive.
+
+**Spawn children must be excluded.** NiceGUI spawns a child that re-runs the module's `__mp_main__` branch; that child walks `main()` again, cannot possibly win the mutex, and falls into the "already running" branch — **opening another browser tab** (the real log gained `__mp_main__: 已有实例在运行,本进程退出` on every launch). Hence the identity check comes first:
+
+```python
+if sys.platform != "win32" or multiprocessing.current_process().name != "MainProcess":
+    return True      # a child is not a second instance: no mutex, no browser
+```
 
 ### 5.6 Idle model unload
 
@@ -338,6 +345,20 @@ Public API: `submit` / `status` / `list_jobs` / `wait` / `transcript` / `cancel`
 
 **③ `_has_orphan(ids)`** — inside `wait()` it detects "no live workers + empty queue + queued tasks exist" and returns `{"stalled": True, "hint": ...}` instead of blocking until timeout. This matches the real case of "the CLI submitted a task but this process isn't scheduling it".
 
+**④ `channel_block_reason(channel)`** — reads `settings.json` for `enable_cli` / `enable_mcp` and, when the channel is off, returns a user-facing reason (including how to turn it back on). File-only: it never builds a `Service`.
+
+**⑤ Persisted vs effective settings** — `Service` keeps `_persisted` (what's on disk) alongside `settings` (persisted + this process's temporary overrides). `get_settings()` reports the former and lists overrides separately:
+
+```python
+data = asdict(self._persisted)
+if self._overrides:
+    data["session_overrides"] = dict(self._overrides)
+```
+
+`transcribe(engine="sensevoice")` only affects the current process and is never written to disk. Previously `get_settings()` echoed the overridden object, so an AI would happily report "I changed your engine to sensevoice" when the file was untouched.
+
+`set_settings()` is now a **read-modify-write**: it re-reads the file, then applies only the changed keys. Otherwise a long-lived MCP process would push its startup snapshot back over a switch the user just flipped in the Settings tab — the least tolerable desync for a field with security semantics.
+
 ### 7.5 `cli.py` — command line
 
 **Encoding adaptation (important)**:
@@ -359,22 +380,47 @@ def _dump_json(payload, indent=2):
 
 Test with `PYTHONIOENCODING=gbk` and verify the output is still valid JSON (ASCII escapes parse fine).
 
+**Channel gate and exit codes.** `main()` is ordered deliberately: `--version` → hand `--mcp` over → **gate** → `setup_logging()` → build `Service`. The gate runs before `Service` because a disabled channel should not open the database (otherwise you take a SQLite lock and spin up a pipeline for nothing); `test_cli_does_not_touch_database_when_disabled` asserts the factory was never called.
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | job failed / execution error (including invalid values) |
+| 2 | bad arguments (missing value, conflicting flags) |
+| 3 | channel disabled in Settings |
+
+`--version` bypasses the gate — at least you can still get the version while debugging.
+
+**Broken pipes don't raise.** `cli ... | head -1` closes stdout early; Python raises `BrokenPipeError`, the exit code becomes 1 and scripts read it as "job failed". `_write()` catches `(BrokenPipeError, OSError, ValueError)` and points `sys.stdout` at `devnull`, which also avoids a second `Exception ignored in: <_io.TextIOWrapper>` flush at interpreter shutdown.
+
 ### 7.6 `mcp_server.py` — MCP server
 
 Hand-written JSON-RPC 2.0 subset; no third-party SDK (smaller bundle, fewer dependency risks).
 
 Methods: `initialize` / `tools/list` / `tools/call` / `notifications/initialized` / `ping`.
 
-**Four robustness measures:**
+**Robustness measures:**
 
 | Problem | Handling |
 |---|---|
-| Unreliable arg types (AI clients send `limit` as a string) | `_arg_int` / `_arg_num` / `_pick` coercion |
+| Unreliable arg types (AI clients send `limit` as a string) | `_arg_int` / `_arg_num` / `_pick` coerce; `"10"` parses, `"abc"` yields a readable error |
 | Client sends a batch (JSON array) | Run `handle()` per item and **flatten** into one response array |
 | NaN in results | `_tool_result()` applies `json_safe` + `allow_nan=False` |
 | Started without pipes (stdin/stdout are None) | `_reopen_null_streams()` logs and returns `False` → `main()` returns 1 |
+| Client unconditionally calls `resources/list` / `prompts/list` | Return empty lists instead of `-32601`; some clients mark the whole server unusable on "method not found" |
+| Stray `print` or third-party output | `_isolate_stdout()` keeps the protocol handle local and points `sys.stdout` at stderr |
+| Client sends non-UTF-8 bytes | stdin uses `errors="replace"`; `serve()` catches decode/read errors and ends the session instead of raising |
+| Channel disabled in Settings | `main()` refuses before building `Service`, writes the reason to stderr, keeps **stdout clean**, exits 1 |
 
-That last one matters: under `console=False` with no pipes, `sys.stdin` is `None` and a raw `readline()` dies with a confusing `AttributeError`. Now it's an explicit log line plus a non-zero exit code.
+**Why stdout must be isolated**: an MCP stdio frame is literally "one JSON per line". A single non-JSON line on stdout makes the client fail `JSON.parse` or drop the connection — and it's brutal to debug, because the culprit is one leftover `print` in your own code. Pulling the protocol channel aside is the standard LSP / MCP approach:
+
+```python
+proto = sys.stdout          # protocol only
+sys.stdout = sys.stderr     # everything else (logs, library prints) goes to stderr
+serve(server, sys.stdin, proto)
+```
+
+**Why bad bytes must not raise**: one malformed byte kills the process and the client only sees "server exited unexpectedly", while the real cause (encoding) hides inside a traceback. Measured: `serve()` used `iter(stdin.readline, "")` and died with `UnicodeDecodeError` on `\xff\xfe`; an explicit `readline()` + `try/except` downgrades the bad line to a `-32700 Parse error` response and the session continues.
 
 ### 7.7 `downloader.py` — download orchestration
 
@@ -446,7 +492,7 @@ Shared policy: always capture the first frame; capture 0.4 s after a cut; minimu
 
 ## 8. Data Contracts
 
-### 8.1 Settings (14 keys)
+### 8.1 Settings (16 keys)
 
 ```jsonc
 {
@@ -463,9 +509,15 @@ Shared policy: always capture the first frame; capture 0.4 s after a cut; minimu
   "cookies_from_browser": "",
   "cookie_file": "",
   "proxy": "",
-  "workers": 2                    // 1–6
+  "workers": 2,                   // 1–6
+  "enable_cli": true,             // CLI channel (desktop-only write)
+  "enable_mcp": true              // MCP channel (desktop-only write)
 }
 ```
+
+The last two are **not** in `OVERRIDABLE_SETTINGS`: both `--set` and the MCP `update_settings` tool reject them. That isn't fussiness — if they were writable, a prompt-injected AI could call `update_settings(enable_mcp=true)` to keep itself installed, or disable the channel to fake a "broken service". The permission boundary lives on the human side.
+
+The reader (`channel_block_reason`) parses `settings.json` directly instead of building a `Service`, because a disabled channel should not open the database or spin up a pipeline. On a corrupt file it falls back to the default (enabled): this switch narrows the external attack surface, it is not a tamper-proof boundary (anyone who can edit the file can flip it back), and a user who wrecked their config is worse off if the CLI is also locked out.
 
 ### 8.2 Job record (SQLite `jobs`)
 
@@ -530,6 +582,10 @@ if info.total_parts > 1:
 | Breaking JS `JSON.parse` | `json_safe` + `allow_nan=False` on every outbound payload |
 | Packaged-exe encoding crash | stdout encoding probe + `ensure_ascii` fallback + `backslashreplace` |
 | Two processes racing one task | `CreateMutexW` single instance + `_scheduled` de-duplication |
+| An AI flipping the channel switches | Both are desktop-only; `--set` / `update_settings` reject them |
+| Desktop and an AI process writing together | `PRAGMA busy_timeout=5000` (WAL allows one writer; wait instead of failing) |
+| Third-party `print` corrupting MCP framing | `_isolate_stdout()` points `sys.stdout` at stderr, protocol handle held separately |
+| Non-UTF-8 input from a client | stdin `errors="replace"` + `serve()` catches decode/read errors → `-32700` instead of a crash |
 | Zombie tasks | Startup recovery over all `ACTIVE_STATUSES` + `wait()` stalled detection |
 | Cookie leakage | Cookies go only to yt-dlp during download; never logged or packaged |
 | Destructive scans/deletes | `scripts/bdelete/` tools require explicit paths; no wildcard deletion |
@@ -590,7 +646,7 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **24 files / 346 cases**, green in about 200 seconds.
+`tests/` holds **24 files / 369 cases**, green in 1–3 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|

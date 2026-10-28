@@ -98,7 +98,8 @@ def test_notification_has_no_response(server):
 
 
 def test_unknown_method_returns_error(server):
-    resp = server.handle({"jsonrpc": "2.0", "id": 3, "method": "resources/list"})
+    # resources/list、prompts/list 已按"空清单"兼容处理,这里用真正未实现的方法
+    resp = server.handle({"jsonrpc": "2.0", "id": 3, "method": "sampling/createMessage"})
     assert resp["error"]["code"] == -32601
 
 
@@ -229,3 +230,66 @@ def test_tool_result_sanitizes_nan_and_infinity(server):
     assert payload["duration"] is None
     assert payload["progress"] is None
     assert payload["nested"] == [None]
+
+
+# ---------- 互操作与通道开关 ----------
+
+def test_resources_and_prompts_list_return_empty(server):
+    """只声明 tools 能力,但部分客户端会无条件拉清单:回空清单而非 -32601。"""
+    for method, key in (("resources/list", "resources"),
+                        ("resources/templates/list", "resourceTemplates"),
+                        ("prompts/list", "prompts")):
+        resp = server.handle({"jsonrpc": "2.0", "id": 9, "method": method})
+        assert resp["result"][key] == [], method
+    assert server.handle({"jsonrpc": "2.0", "method": "logging/setLevel",
+                          "params": {"level": "info"}}) is None
+
+
+def test_client_config_matches_runtime_mode():
+    from app.mcp_server import client_config
+    frozen = client_config(r"C:/apps/bili-transcriber.exe", frozen=True)
+    assert frozen["mcpServers"]["bili-transcriber"] == {
+        "command": r"C:/apps/bili-transcriber.exe", "args": ["--mcp"]}
+    source = client_config("C:/py/python.exe", frozen=False)
+    assert source["mcpServers"]["bili-transcriber"]["args"] == ["-m", "app.mcp_server"]
+
+
+def test_main_refuses_when_mcp_disabled(tmp_path, monkeypatch, capsys):
+    """设置页关掉 MCP 后,服务必须退出码 1 且把原因写 stderr(不能污染 stdout)。"""
+    import app.mcp_server as mcp
+    from app.store import Settings, save_settings
+
+    monkeypatch.setattr(mcp, "setup_logging", lambda: None)
+    monkeypatch.setattr("app.headless.default_data_dir", lambda: tmp_path)
+    save_settings(Settings(enable_mcp=False), tmp_path / "settings.json")
+    assert mcp.main() == 1
+    err = capsys.readouterr().err
+    assert "enable_mcp" in err and "设置" in err
+
+
+def test_isolate_stdout_keeps_protocol_channel_clean(monkeypatch):
+    """任何遗留的 print 都不能落进 JSON-RPC 通道。"""
+    import app.mcp_server as mcp
+
+    proto, err = io.StringIO(), io.StringIO()
+    monkeypatch.setattr("sys.stdout", proto)
+    monkeypatch.setattr("sys.stderr", err)
+    proto_out = mcp._isolate_stdout()
+    print("stray log line")           # 模拟第三方库/遗留调试输出
+    proto_out.write('{"jsonrpc":"2.0"}\n')
+
+    assert "stray log line" in err.getvalue()
+    assert "stray log line" not in proto.getvalue()
+    assert proto.getvalue() == '{"jsonrpc":"2.0"}\n'
+
+
+def test_serve_tolerates_non_utf8_input():
+    """客户端塞进非 UTF-8 字节时降级为解析错误,不能把整个会话拆掉。"""
+    stream = io.TextIOWrapper(
+        io.BytesIO(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n\xff\xfe\n'),
+        encoding="utf-8", errors="replace")  # 与 main() 里 reconfigure 的配置一致
+    out = io.StringIO()
+    serve(MCPServer(service_factory=lambda: FakeService()), stream, out)
+    lines = [json.loads(x) for x in out.getvalue().strip().splitlines()]
+    assert lines[0]["result"] == {}
+    assert lines[1]["error"]["code"] == -32700

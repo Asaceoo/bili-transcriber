@@ -236,3 +236,32 @@ def test_job_reveal_bv_prefix_match(tmp_path, monkeypatch):
         "resolve_output_dir": lambda self, base: tmp_path / "out",
     })())
     assert _job_reveal_path(job) == str(actual.resolve())
+
+
+# ---------- 单实例互斥:spawn 子进程不是"第二个实例" ----------
+
+def test_spawn_child_is_not_treated_as_second_instance(monkeypatch):
+    """NiceGUI/multiprocessing 的子进程会重跑 main();它若去抢互斥体,
+    必然抢不到,然后按"已有实例"分支再开一个浏览器标签页。"""
+    import multiprocessing as mp
+
+    import app.main as main_mod
+
+    class _Proc:
+        name = "SpawnProcess"
+
+    monkeypatch.setattr(mp, "current_process", lambda: _Proc())
+    assert main_mod._is_spawn_child() is True
+    assert main_mod._acquire_single_instance() is True   # 直接放行,不碰互斥体
+
+
+def test_main_process_still_checks_mutex(monkeypatch):
+    import multiprocessing as mp
+
+    import app.main as main_mod
+
+    class _Proc:
+        name = "MainProcess"
+
+    monkeypatch.setattr(mp, "current_process", lambda: _Proc())
+    assert main_mod._is_spawn_child() is False

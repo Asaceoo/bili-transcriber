@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import sys
 import threading
 
 from nicegui import run, ui
@@ -372,6 +374,44 @@ def main_page() -> None:
                         label="并发任务数(下载/转码并行,转写仍串行)",
                         value=settings.workers,
                     ).bind_value(settings, "workers").classes("w-full")
+
+                    # ---------- AI 调用与命令行(外部程序访问) ----------
+                    ui.separator().classes("w-full")
+                    ui.label("AI 调用与命令行").classes("font-medium")
+                    ui.switch(
+                        "允许命令行(CLI)调用:脚本 / 自动化 / 终端",
+                        value=settings.enable_cli,
+                    ).bind_value(settings, "enable_cli")
+                    ui.switch(
+                        "允许 MCP 调用:WorkBuddy / DeepSeek-Honey 等 AI 软件",
+                        value=settings.enable_mcp,
+                    ).bind_value(settings, "enable_mcp")
+                    ui.label(
+                        "两个通道默认开启,关闭后新启动的进程会被直接拒绝"
+                        "(退出码 3 / MCP 退出码 1),已在连接中的客户端需重连才生效;\n"
+                        "桌面端本身始终可用。重新开启:勾选后点「保存设置」,"
+                        "或把 settings.json 里的 enable_cli / enable_mcp 改成 true。"
+                    ).classes("text-xs text-grey-6")
+
+                    def _mcp_config_text() -> str:
+                        from app.mcp_server import client_config
+                        return json.dumps(client_config(), ensure_ascii=False, indent=2)
+
+                    with ui.expansion("MCP 客户端配置(复制到 AI 软件即可)", icon="content_copy") \
+                            .classes("w-full"):
+                        ui.code(_mcp_config_text(), language="json").classes("w-full text-xs")
+
+                        def _copy_mcp() -> None:
+                            ui.clipboard.write(_mcp_config_text())
+                            ui.notify("配置已复制到剪贴板", type="positive")
+
+                        ui.button("复制配置", icon="content_copy", on_click=_copy_mcp) \
+                            .props("flat dense")
+                        ui.label(
+                            f"当前可执行文件:{sys.executable}"
+                            if getattr(sys, "frozen", False)
+                            else f"源码模式:{sys.executable} -m app.mcp_server"
+                        ).classes("text-xs text-grey-6")
 
                     # 模型外置:模型目录(用户自放模型包) + 状态提示
                     model_dir_input = ui.input("模型目录(留空=默认 AppData 位置)").bind_value(

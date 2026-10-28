@@ -9,21 +9,25 @@
   bili-transcriber-cli --set engine=whisper --set model_size=large-v3-turbo
   bili-transcriber-cli --mcp        # 以 MCP stdio 服务运行
 
-退出码:0 成功;1 任务失败/执行错误;2 参数错误。
+退出码:0 成功;1 任务失败/执行错误;2 参数错误;3 通道已在设置页关闭。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
 from app import APP_VERSION
-from app.headless import Service, ServiceError, json_safe
+from app.headless import (
+    Service, ServiceError, channel_block_reason, json_safe,
+)
 from app.logging_setup import setup_logging
 
 SERVICE_FACTORY = Service  # 测试可替换
+EXIT_CHANNEL_DISABLED = 3  # 设置页关闭了 CLI 通道;与"任务失败(1)/参数错(2)"区分开
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -89,7 +93,12 @@ def _dump_json(payload: Any, indent: int | None = 2) -> str:
 
 
 def _write(text: str) -> None:
-    """写一行到 stdout;流缺失(无控制台)时静默跳过,编码不兼容时转义兜底。"""
+    """写一行到 stdout;流缺失(无控制台/下游已关闭)时静默跳过。
+
+    `bili-transcriber-cli ... | head -1` 这类管道用法会让 stdout 提前关闭,
+    Python 默认抛 BrokenPipeError 打出 traceback —— 对命令行工具是噪音,
+    且退出码会变成 1,脚本会误判成"任务失败"。
+    """
     out = sys.stdout
     if out is None:
         return
@@ -100,6 +109,15 @@ def _write(text: str) -> None:
         out.write(text.encode(_stream_encoding(), "backslashreplace").decode(
             _stream_encoding(), "replace") + "\n")
         out.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        # 下游已关闭 / 句柄失效:把 fd 重定向到 devnull,避免解释器退出时
+        # 再次 flush 报 "Exception ignored in: <_io.TextIOWrapper>"
+        try:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            sys.stdout = None  # type: ignore[assignment]
+    except AttributeError:
+        pass
 
 
 def _emit(payload: dict, as_json: bool, human: str = "") -> None:
@@ -142,11 +160,18 @@ def _job_line(job: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     if args.version:
+        # --version 不受通道开关影响:它只是一行版本号,留着便于排查
         _write(APP_VERSION)
         return 0
     if args.mcp:
         from app.mcp_server import main as mcp_main
         return mcp_main()
+    # 通道门禁:放在构造 Service 之前 —— 关闭时不该去开数据库/建 pipeline
+    blocked = channel_block_reason("cli")
+    if blocked:
+        _emit({"ok": False, "error": blocked, "channel": "cli", "enabled": False},
+              args.json, f"错误:{blocked}")
+        return EXIT_CHANNEL_DISABLED
 
     setup_logging()
     service: Service | None = None

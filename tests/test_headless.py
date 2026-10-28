@@ -6,7 +6,7 @@ import pytest
 
 import app.converter as converter
 from app.downloader import MediaInfo
-from app.headless import Service, ServiceError
+from app.headless import Service, ServiceError, channel_block_reason
 from app.pipeline import Pipeline
 from app.store import Job, Settings, Store
 from app.transcriber import Segment
@@ -293,3 +293,65 @@ def test_list_jobs_running_alias_covers_active_stages(service):
                                      duration=0, url="", status=st))
     assert {j["media_id"] for j in service.list_jobs(status="running")} == {"a", "b"}
     assert [j["media_id"] for j in service.list_jobs(status="done")] == ["c"]
+
+
+# ---------- 通道开关(CLI/MCP 的开关由桌面端设置页维护) ----------
+
+def test_channel_block_reason_default_allows(tmp_path: Path):
+    """没有 settings.json(全新安装)时两个通道都可用。"""
+    missing = tmp_path / "nope.json"
+    assert channel_block_reason("cli", missing) == ""
+    assert channel_block_reason("mcp", missing) == ""
+
+
+def test_channel_block_reason_reports_disabled_channel(tmp_path: Path):
+    from app.store import save_settings
+    p = tmp_path / "settings.json"
+    save_settings(Settings(enable_cli=False), p)
+    msg = channel_block_reason("cli", p)
+    assert "命令行" in msg and "enable_cli" in msg
+    # 两个开关互不影响
+    assert channel_block_reason("mcp", p) == ""
+
+
+def test_channel_block_reason_ignores_unknown_channel(tmp_path: Path):
+    assert channel_block_reason("carrier-pigeon", tmp_path / "x.json") == ""
+
+
+def test_set_settings_rejects_channel_switches(service):
+    """通道开关只能由桌面端改:被提示注入的 AI 不能给自己开门/关门。"""
+    with pytest.raises(ServiceError) as ei:
+        service.set_settings(enable_mcp=False)
+    assert "桌面端设置页" in str(ei.value)
+
+
+def test_set_settings_keeps_switch_changed_on_disk(service, tmp_path: Path):
+    """设置的写入是读-改-写:长驻 MCP 进程不能把用户在设置页关掉的开关写回来。"""
+    from dataclasses import replace
+
+    from app.store import load_settings, save_settings
+
+    service.set_settings(engine="whisper")  # 先落盘一份
+    path = tmp_path / "data" / "settings.json"
+    on_disk = load_settings(path)
+    save_settings(replace(on_disk, enable_mcp=False), path)  # 模拟用户在设置页关掉
+
+    service.set_settings(engine="sensevoice")  # 之后 AI 又调了一次 update_settings
+    assert load_settings(path).enable_mcp is False
+    assert service.get_settings()["enable_mcp"] is False
+    assert load_settings(path).engine == "sensevoice"
+
+
+def test_get_settings_reports_persisted_not_session_override(service):
+    """传过 engine 覆盖后,get_settings 仍要报磁盘上的配置,并单列本次覆盖。"""
+    service.submit("https://x/video/BV1svc", engine="sensevoice")
+    data = service.get_settings()
+    assert data["engine"] == "whisper"
+    assert data["session_overrides"]["engine"] == "sensevoice"
+
+
+def test_set_settings_rejects_empty_output_dir(service):
+    """空 output_dir 会被解析成程序根目录,产物散落到源码树里,必须当场拒绝。"""
+    with pytest.raises(ServiceError) as ei:
+        service.set_settings(output_dir="   ")
+    assert "不能为空" in str(ei.value)

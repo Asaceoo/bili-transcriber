@@ -60,6 +60,10 @@ def _validate_settings(changes: dict) -> list[str]:
         raise ServiceError(f"device 不支持:{device}(可选:{', '.join(VALID_DEVICES)})")
     out = changes.get("output_dir")
     if out is not None:
+        if not str(out).strip():
+            # `--set output_dir=` 会把空串落盘,之后 resolve 成 base_dir,
+            # 产物直接散落到程序根目录 —— 当场拒绝比事后收拾便宜
+            raise ServiceError("output_dir 不能为空(留空不等于使用默认值)")
         target = Path(str(out)).expanduser()
         try:
             target.mkdir(parents=True, exist_ok=True)
@@ -86,6 +90,39 @@ def normalize_source(source: str) -> str:
     if _BARE_VIDEO_ID.match(source):
         return f"https://www.bilibili.com/video/{source}"
     return source
+
+
+# ---------- 外部调用通道开关(桌面端设置页维护) ----------
+# 通道名 -> 设置字段。这两个字段**不在** OVERRIDABLE_SETTINGS 里:CLI/MCP
+# 只能读,不能改 —— 否则一个被提示注入的 AI 就能给自己开门或关门。
+CHANNEL_SWITCHES = {"cli": "enable_cli", "mcp": "enable_mcp"}
+CHANNEL_LABELS = {"cli": "命令行(CLI)", "mcp": "MCP(AI 软件调用)"}
+
+
+def channel_block_reason(channel: str, settings_path: Path | None = None) -> str:
+    """通道被用户在设置页关闭时返回可读原因;可用时返回空串。
+
+    直接读 settings.json 而不构造 Service:通道关闭时连数据库都不该打开
+    (否则白拿一把 SQLite 锁、白建一个 pipeline)。
+
+    配置损坏时按默认值(开启)放行 —— 这道开关用于收敛外部调用面,不是
+    抗篡改的安全边界(能手改 settings.json 的人本就能改回来);而毁掉
+    settings.json 的用户若连 CLI 都进不去,反而更难自救。
+    """
+    field = CHANNEL_SWITCHES.get(channel)
+    if field is None:
+        return ""
+    path = Path(settings_path) if settings_path else default_data_dir() / "settings.json"
+    try:
+        enabled = bool(getattr(load_settings(path), field, True))
+    except Exception:  # noqa: BLE001 — 读配置失败不应把用户锁在门外
+        logger.exception("读取通道开关失败,按开启处理: %s", path)
+        return ""
+    if enabled:
+        return ""
+    label = CHANNEL_LABELS.get(channel, channel)
+    return (f"{label}通道已在桌面端「设置」中关闭。"
+            f"重新开启:打开桌面端设置页勾选,或把 {path} 里的 \"{field}\" 改成 true。")
 
 
 def job_to_dict(job: Job) -> dict:
@@ -125,6 +162,11 @@ class Service:
         self.settings_path = data_dir / "settings.json"
         self.store = store or Store(data_dir / "history.db")
         self.settings = settings or load_settings(self.settings_path)
+        # 已持久化的基线(与"本次进程生效的设置"区分开):get_settings() 必须
+        # 报磁盘上的真相,否则 AI 传过一次 engine=sensevoice 覆盖后再查设置,
+        # 会看到 sensevoice 并误以为用户的配置被改写了。
+        self._persisted: Settings = self.settings
+        self._overrides: dict[str, Any] = {}
         self.downloader = downloader or Downloader()
         self.pipeline = pipeline or Pipeline(
             downloader=self.downloader, store=self.store,
@@ -199,6 +241,7 @@ class Service:
         if not clean:
             return
         _validate_settings(clean)
+        self._overrides.update(clean)
         self.settings = replace(self.settings, **clean)
         self.pipeline.apply_settings(self.settings)
 
@@ -343,20 +386,37 @@ class Service:
     # ---------- 设置 ----------
 
     def get_settings(self) -> dict:
-        return asdict(self.settings)
+        """已持久化的设置;本次进程内的临时覆盖单列在 session_overrides。
+
+        transcribe/提交类的 engine/model 等覆盖只在本进程生效、不写盘,
+        以前 get_settings 直接回显了被覆盖后的对象,调用方会误判"配置被改了"。
+        """
+        data = asdict(self._persisted)
+        if self._overrides:
+            data["session_overrides"] = dict(self._overrides)
+        return data
 
     def set_settings(self, **changes: Any) -> dict:
         """持久化设置到 data/settings.json(GUI 与后续进程同样生效)。"""
         clean = {k: v for k, v in changes.items() if v is not None}
         unknown = [k for k in clean if k not in OVERRIDABLE_SETTINGS]
         if unknown:
-            raise ServiceError(f"不支持修改的设置项:{', '.join(unknown)}")
+            # 通道开关(enable_cli/enable_mcp)故意落在这里:它们只归桌面端。
+            hint = ("(通道开关请在桌面端设置页修改)"
+                    if any(k in CHANNEL_SWITCHES.values() for k in unknown) else "")
+            raise ServiceError(f"不支持修改的设置项:{', '.join(unknown)}{hint}")
         # 按字段类型强转:防止 AI 客户端传 workers="abc" 之类的坏值写进
         # settings.json,把桌面端下次启动也带崩(与 load_settings 同一套规则)。
         coerced = {k: _coerce_setting(k, v) for k, v in clean.items()}
         warnings = _validate_settings(coerced)
-        self.settings = replace(self.settings, **coerced)
-        save_settings(self.settings, self.settings_path)
+        # 读-改-写:本进程可能是长驻的 MCP 服务,启动后用户在设置页改过的
+        # 字段不该被这里用内存里的旧值覆盖回去(通道开关尤其致命 —— 会在
+        # 用户关掉 MCP 之后又被一次 update_settings 悄悄打开)。
+        base = load_settings(self.settings_path) if self.settings_path.exists() else self._persisted
+        self._persisted = replace(base, **coerced)
+        self.settings = self._persisted
+        self._overrides.clear()
+        save_settings(self._persisted, self.settings_path)
         self.pipeline.apply_settings(self.settings)
         payload = {"saved": True, "settings": asdict(self.settings)}
         if warnings:

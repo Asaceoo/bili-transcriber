@@ -137,3 +137,47 @@ def test_notes_path_migrated_from_legacy_db(tmp_path: Path):
     got.notes_path = "D:/x/old.notes.md"
     store.upsert_job(got)
     assert store.get_job("BV1old").notes_path == "D:/x/old.notes.md"
+
+
+def test_channel_switches_default_enabled():
+    """CLI/MCP 开关默认开启:升级后行为与旧版一致,不会突然调不动。"""
+    s = Settings()
+    assert s.enable_cli is True and s.enable_mcp is True
+
+
+def test_channel_switches_roundtrip_and_coerce(tmp_path: Path):
+    p = tmp_path / "settings.json"
+    save_settings(Settings(enable_cli=False, enable_mcp=False), p)
+    loaded = load_settings(p)
+    assert loaded.enable_cli is False and loaded.enable_mcp is False
+    # 手写坏值(字符串 "false")按同一套规则强转,不让手改的配置把通道意外打开
+    p.write_text('{"enable_cli": "false", "enable_mcp": 0}', encoding="utf-8")
+    loaded = load_settings(p)
+    assert loaded.enable_cli is False and loaded.enable_mcp is False
+
+
+def test_busy_timeout_allows_concurrent_writers(tmp_path: Path):
+    """桌面端与 CLI/MCP 是两个进程写同一 history.db:不能出现 database is locked。"""
+    import threading
+
+    a = Store(tmp_path / "h.db")
+    b = Store(tmp_path / "h.db")
+    assert a._conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 1000
+
+    errs: list[str] = []
+
+    def writer(store: Store, tag: str) -> None:
+        for i in range(40):
+            try:
+                store.upsert_job(make_job(f"{tag}{i}", title=f"{tag}-{i}"))
+            except Exception as exc:  # noqa: BLE001 — 失败即记录,由断言兜住
+                errs.append(f"{tag}: {type(exc).__name__}: {exc}")
+                return
+
+    ts = [threading.Thread(target=writer, args=(s, t)) for s, t in ((a, "a"), (b, "b"))]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert errs == []
+    assert len(a.list_jobs("")) == 80

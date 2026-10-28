@@ -10,7 +10,7 @@
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
 [![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-346%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-369%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
 </div>
@@ -84,6 +84,7 @@
 - **图文讲义** — 自动识别 PPT 翻页画面，生成「时间戳 + 截图 + 该页字幕」的讲义。
 - **系统托盘** — 关窗不退出，任务继续跑。
 - **单实例保护** — 重复启动只会把已有窗口调出来，不会抢同一个任务。
+- **CLI + MCP 双通道** — 命令行与 AI 软件都能调；两个通道各有开关，设置页一键关闭。
 - **纯本地** — 转写过程不调用任何外部 AI API。
 
 ---
@@ -184,6 +185,8 @@ python -m venv .venv
 | 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要 |
 | 输出目录 | 路径 | 默认 `output/` |
 | 并发数 | 整数 | 下载/转码并发，转写始终串行 |
+| 允许 CLI 调用 | 开 / 关 | 关掉后 `--cli` 直接拒绝（退出码 3） |
+| 允许 MCP 调用 | 开 / 关 | 关掉后 `--mcp` 拒绝启动（退出码 1） |
 
 > 设置页保存前会校验：引擎 / 设备白名单，输出目录实际可创建可写。填错直接拒绝并提示原因。
 
@@ -421,6 +424,20 @@ bili-transcriber.exe --version
 
 细节见 [`docs/ai-integration.md`](docs/ai-integration.md)。
 
+### 通道开关（设置页可关）
+
+设置页有一节「AI 调用与命令行」，两个开关默认都开：
+
+| 开关 | 关掉之后 |
+|---|---|
+| 允许命令行（CLI）调用 | `--cli` / `bili-transcriber-cli` 直接返回 `{"ok": false, "error": "…已在桌面端「设置」中关闭"}`,退出码 **3** |
+| 允许 MCP 调用 | `--mcp` 不进入协议循环，原因写 stderr，退出码 **1**（stdout 保持干净） |
+
+- **只影响新进程**：已经连上的 MCP 客户端需要重连才生效；桌面端本身始终可用。
+- **只能从桌面端改**：`update_settings` / `--set` 都不接受这两个键 —— 被提示注入的 AI 没法给自己开门。
+- **重新开启**：勾选后点「保存设置」；或直接把 `data/settings.json` 里 `enable_cli` / `enable_mcp` 改成 `true`。
+- 同一节里还有「MCP 客户端配置」折叠面板，展开后是可复制的 `mcpServers` 片段，命令路径按当前形态自动填（打包版填 `xxx.exe --mcp`，源码模式填 `python -m app.mcp_server`）。
+
 ---
 
 ## 输出结构
@@ -502,7 +519,7 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 346 passed
+.venv\Scripts\pytest -q                    # 当前 369 passed
 .venv\Scripts\python -m app.main           # 开发运行
 ```
 

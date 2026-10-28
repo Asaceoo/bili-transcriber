@@ -186,3 +186,58 @@ def test_cli_json_sanitizes_nan():
     text = cli._dump_json({"duration": float("nan"), "title": "标题"})
     assert "NaN" not in text
     assert json.loads(text)["duration"] is None
+
+
+# ---------- 通道开关(设置页关闭 CLI 后必须直接拒绝) ----------
+
+def _write_settings(tmp_path, monkeypatch, **flags):
+    from app.store import Settings, save_settings
+    monkeypatch.setattr("app.headless.default_data_dir", lambda: tmp_path)
+    save_settings(Settings(**flags), tmp_path / "settings.json")
+
+
+def test_cli_disabled_exits_3(tmp_path, monkeypatch, capsys):
+    _write_settings(tmp_path, monkeypatch, enable_cli=False)
+    assert cli.main(["--list", "--json"]) == cli.EXIT_CHANNEL_DISABLED == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False and payload["channel"] == "cli"
+    assert "enable_cli" in payload["error"]
+
+
+def test_cli_disabled_still_reports_version(tmp_path, monkeypatch, capsys):
+    """通道关了也要能查版本,否则排查问题时连版本都拿不到。"""
+    _write_settings(tmp_path, monkeypatch, enable_cli=False)
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr().out.strip()
+
+
+def test_cli_enabled_passes_gate(tmp_path, monkeypatch, fake, capsys):
+    _write_settings(tmp_path, monkeypatch, enable_cli=True)
+    assert cli.main(["--list", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 1
+
+
+def test_cli_does_not_touch_database_when_disabled(tmp_path, monkeypatch):
+    """拒绝要发生在建 Service 之前:否则会白开一次 SQLite、白建一个 pipeline。"""
+    _write_settings(tmp_path, monkeypatch, enable_cli=False)
+    called: list[int] = []
+    monkeypatch.setattr(cli, "SERVICE_FACTORY", lambda: called.append(1) or None)
+    assert cli.main(["--list"]) == 3
+    assert called == []
+
+
+def test_write_ignores_broken_pipe(monkeypatch):
+    """`cli ... | head -1` 提前关闭下游时,不能抛 BrokenPipeError 也不能改退出码。"""
+    class Broken:
+        encoding = "utf-8"
+
+        def write(self, _text):
+            raise BrokenPipeError(32, "Broken pipe")
+
+        def flush(self):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    monkeypatch.setattr("sys.stdout", Broken())
+    cli._write("hello")            # 不应抛出
+    assert cli._write.__name__ == "_write"
+

@@ -22,7 +22,7 @@ import sys
 from typing import Any, TextIO
 
 from app import APP_VERSION
-from app.headless import Service, ServiceError, json_safe
+from app.headless import Service, ServiceError, channel_block_reason, json_safe
 from app.logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,15 @@ INSTRUCTIONS = (
 )
 
 _ID = {"type": "string", "description": "任务 ID(提交时返回的 media_id)"}
+
+# 只声明了 tools 能力,但部分客户端会无条件拉资源/提示词清单:回 -32601 会让
+# 它把整个服务标记成不可用。这里回空清单,语义等同于"没实现,但确实没有"。
+EMPTY_METHOD_RESULTS: dict[str, dict] = {
+    "resources/list": {"resources": []},
+    "resources/templates/list": {"resourceTemplates": []},
+    "prompts/list": {"prompts": []},
+    "logging/setLevel": {},
+}
 
 TOOLS: list[dict] = [
     {
@@ -155,6 +164,18 @@ TOOLS: list[dict] = [
 ]
 
 
+def client_config(executable: str | None = None, frozen: bool | None = None) -> dict:
+    """生成 MCP 客户端配置片段,供设置页展示/复制。
+
+    打包版是 `bili-transcriber.exe --mcp`;源码模式是 `python -m app.mcp_server`。
+    显式传参便于测试,不传则按当前进程推断。
+    """
+    exe = executable or sys.executable or "bili-transcriber.exe"
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    args = ["--mcp"] if is_frozen else ["-m", "app.mcp_server"]
+    return {"mcpServers": {SERVER_NAME: {"command": exe, "args": args}}}
+
+
 def _ok(request_id: Any, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
@@ -247,6 +268,8 @@ class MCPServer:
             result = {"tools": TOOLS}
         elif method == "tools/call":
             result = self._tools_call(params)
+        elif method in EMPTY_METHOD_RESULTS:
+            result = EMPTY_METHOD_RESULTS[method]
         else:
             return None if is_notification else _err(request_id, -32601,
                                                      f"Method not found: {method}")
@@ -367,7 +390,16 @@ def serve(server: MCPServer, stdin: TextIO, stdout: TextIO) -> None:
     if stdin is None or stdout is None:
         logger.error("MCP stdio 通道缺失,拒绝启动(需由客户端提供管道)")
         return
-    for raw in iter(stdin.readline, ""):
+    while True:
+        try:
+            raw = stdin.readline()
+        except (UnicodeDecodeError, ValueError, OSError) as exc:
+            # 客户端塞了非 UTF-8 字节、管道被关或句柄失效:会话到此为止,
+            # 但不该把整个进程带进 traceback(客户端只会看到"服务崩了")。
+            logger.warning("读取 stdin 失败,结束会话: %s", exc)
+            return
+        if not raw:
+            return
         line = raw.strip()
         if not line:
             continue
@@ -396,33 +428,68 @@ def _reopen_null_streams() -> bool:
     sys.stdin/stdout 置为 None。继续跑只会让 `stdout.write` 抛 AttributeError,
     表现为"服务无响应";这里显式判定、写日志并以退出码 1 结束,便于定位。
     """
-    missing = [name for name in ("stdin", "stdout") if getattr(sys, name) is None]
+    missing = [name for name in ("stdin", "stdout", "stderr")
+               if getattr(sys, name) is None]
     for name in missing:
         try:
             setattr(sys, name, open(os.devnull, "r" if name == "stdin" else "w",
                                     encoding="utf-8"))
         except OSError:
             pass
-    if missing:
+    # stderr 缺失不致命(只影响日志),stdin/stdout 缺失就无法跑协议了
+    fatal = [n for n in missing if n in ("stdin", "stdout")]
+    if fatal:
         logger.error("MCP 启动失败:%s 不可用(客户端必须通过管道启动,"
-                     "不要直接双击 exe 或脱离管道运行)", "/".join(missing))
+                     "不要直接双击 exe 或脱离管道运行)", "/".join(fatal))
         return False
     return True
+
+
+def _isolate_stdout() -> TextIO | None:
+    """把协议通道单独摘出来,sys.stdout 改指向 stderr。
+
+    只做 `json.dumps + write` 是不够的:任何一处遗留的 print、第三方库的
+    进度输出、甚至被测代码的调试语句,只要落到 stdout 就会在 JSON-RPC 里
+    插进一行垃圾,客户端要么解析失败要么直接断开。协议通道握在本地变量里,
+    其余输出统统一律去 stderr,是 LSP/MCP server 的通行做法。
+    """
+    proto = sys.stdout
+    if proto is None:
+        return None
+    try:
+        proto.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, OSError):
+        pass
+    stderr = sys.stderr
+    if stderr is not None:
+        sys.stdout = stderr  # type: ignore[assignment]
+    return proto
 
 
 def main() -> int:
     setup_logging()
     if not _reopen_null_streams():
         return 1
-    for stream in (sys.stdin, sys.stdout):
+    # 通道门禁:桌面端设置页可关闭 MCP。放在建 Service 之前(别白开数据库),
+    # 且必须在接管 stdout 之前 —— 拒绝信息要写 stderr,不能污染协议通道。
+    blocked = channel_block_reason("mcp")
+    if blocked:
+        if sys.stderr is not None:
+            print(f"[bili mcp] {blocked}", file=sys.stderr)
+        logger.error("MCP 通道已关闭:%s", blocked)
+        return 1
+    proto_out = _isolate_stdout()
+    for stream in (sys.stdin, proto_out):
         try:
-            stream.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[attr-defined]
+            # errors="replace":客户端偶尔会塞进非 UTF-8 字节(复制粘贴的乱码),
+            # 严格模式会直接抛 UnicodeDecodeError 把整个会话拆掉。
+            stream.reconfigure(encoding="utf-8", errors="replace", newline="\n")  # type: ignore[attr-defined]
         except (AttributeError, ValueError, OSError):
             pass
     logger.info("MCP stdio 服务启动(protocol=%s)", DEFAULT_PROTOCOL)
     server = MCPServer()
     try:
-        serve(server, sys.stdin, sys.stdout)
+        serve(server, sys.stdin, proto_out)
     except KeyboardInterrupt:
         pass
     finally:

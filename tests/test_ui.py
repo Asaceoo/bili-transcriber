@@ -24,3 +24,13 @@ async def test_main_page_renders(user: User):
     await user.should_see("视频音频本地转写")
     await user.should_see("粘贴视频链接")
     await user.should_see("输出目录")
+
+
+async def test_settings_has_channel_switches(user: User):
+    """设置页要有 CLI / MCP 两个通道开关,并能看到 MCP 客户端配置。"""
+    await user.open("/")
+    user.find("设置").click()
+    await user.should_see("AI 调用与命令行")
+    await user.should_see("允许命令行(CLI)调用")
+    await user.should_see("允许 MCP 调用")
+    await user.should_see("MCP 客户端配置")

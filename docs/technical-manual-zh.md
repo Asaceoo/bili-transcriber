@@ -153,7 +153,7 @@ bili-transcriber/
 │   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
 │   ├── e2e_check.py            # 端到端链路检查
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（24 文件 / 346 用例）
+├── tests/                      # pytest（24 文件 / 369 用例）
 ├── docs/                       # 双语手册 + assets/ 概念图
 ├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
 ├── output/                     # 转写产物（运行时）
@@ -220,6 +220,13 @@ if ctypes.get_last_error() == ERROR_ALREADY_EXISTS (183):
 ```
 
 命名里带 `DATA_DIR` 的哈希，因此**不同数据目录可以并行跑多个实例**（比如一个正式版一个测试版），同目录则互斥。
+
+**子进程必须排除在外**。NiceGUI 会 spawn 子进程并重跑模块的 `__mp_main__` 分支，子进程再走一次 `main()` 必然抢不到互斥体，然后按"已有实例"分支**又开一个浏览器标签页**（真机日志每次启动都多一行 `__mp_main__: 已有实例在运行,本进程退出`）。因此判定顺序里先查进程身份：
+
+```python
+if sys.platform != "win32" or multiprocessing.current_process().name != "MainProcess":
+    return True      # 子进程不是"第二个实例",既不抢互斥体也不开浏览器
+```
 
 ### 5.6 模型空闲卸载
 
@@ -337,6 +344,20 @@ UI 线程每 **0.6s** 轮询 `Store` 并消费事件 `deque(maxlen=200)`。
 
 **③ `_has_orphan(ids)`** — `wait()` 里检测「无存活 worker + 队列空 + 存在 queued」的组合，命中则返回 `{"stalled": True, "hint": "..."}` 而不是死等超时。这对应「CLI 提交了任务但本进程没在调度它」的真实场景。
 
+**④ `channel_block_reason(channel)`** — 读 `settings.json` 判断 `enable_cli` / `enable_mcp`，被关时返回一段可直接展示给用户的中文原因（含"怎么改回来"）。只读文件、不建 `Service`。
+
+**⑤ 已持久化 vs 本次生效** — `Service` 同时持有 `_persisted`（磁盘真相）与 `settings`（叠加了本次进程的临时覆盖）。`get_settings()` 报前者，并把临时覆盖单列在 `session_overrides` 里：
+
+```python
+data = asdict(self._persisted)
+if self._overrides:
+    data["session_overrides"] = dict(self._overrides)
+```
+
+原因：`transcribe(engine="sensevoice")` 只在本进程生效、不写盘。以前 `get_settings()` 回显被覆盖后的对象，AI 会据此告诉用户"我已把你的引擎改成 sensevoice"，其实磁盘上没变。
+
+`set_settings()` 改成了**读-改-写**：先重新读一遍磁盘，再套用本次改动的键。否则长驻的 MCP 进程会用启动时那份内存副本把用户在设置页刚改的开关覆盖回去 —— 这是"通道开关"这类安全语义字段上最不能容忍的失步。
+
 ### 7.5 `cli.py` — 命令行
 
 **编码自适应（重要）**：
@@ -358,22 +379,47 @@ def _dump_json(payload, indent=2):
 
 测法：`PYTHONIOENCODING=gbk` 跑一遍，确认输出仍是合法 JSON（ASCII 转义也能被 `JSON.parse` 解析）。
 
+**通道门禁与退出码**。`main()` 的顺序被刻意安排成：`--version` → `--mcp` 转交 → **门禁** → `setup_logging()` → 建 `Service`。门禁放在建 Service 之前，是因为通道关闭时不该去开数据库（否则白拿一把 SQLite 锁、白建一个 pipeline），测试 `test_cli_does_not_touch_database_when_disabled` 直接断言工厂没被调用。
+
+| 码 | 含义 |
+|---|---|
+| 0 | 成功 |
+| 1 | 任务失败 / 执行错误（含参数值非法） |
+| 2 | 参数错误（缺值、互斥冲突） |
+| 3 | 通道已在设置页关闭 |
+
+`--version` 不受门禁影响 —— 排查问题时至少还能拿到版本号。
+
+**断管不抛栈**。`cli ... | head -1` 会让 stdout 提前关闭，Python 默认抛 `BrokenPipeError`，退出码变 1，脚本误判成"任务失败"。`_write()` 捕获 `(BrokenPipeError, OSError, ValueError)` 后把 `sys.stdout` 指向 `devnull`，同时避免解释器退出时再 flush 一次报 `Exception ignored in: <_io.TextIOWrapper>`。
+
 ### 7.6 `mcp_server.py` — MCP 服务端
 
 手写 JSON-RPC 2.0 子集，不引第三方 SDK（降低打包体积与依赖风险）。
 
 支持方法：`initialize` / `tools/list` / `tools/call` / `notifications/initialized` / `ping`。
 
-**四个健壮性处理：**
+**健壮性处理：**
 
 | 问题 | 处理 |
 |---|---|
-| 参数类型不可靠（AI 常把 `limit` 传成字符串） | `_arg_int` / `_arg_num` / `_pick` 容错转换 |
+| 参数类型不可靠（AI 常把 `limit` 传成字符串） | `_arg_int` / `_arg_num` / `_pick` 容错转换；`"10"` 能解析，`"abc"` 给可读错误 |
 | 客户端发批量请求（JSON 数组） | 逐条 `handle()` 后**展平**为单个响应数组 |
 | 结果里有 NaN | `_tool_result()` 统一 `json_safe` + `allow_nan=False` |
 | 被非管道方式启动（stdin/stdout 为 None） | `_reopen_null_streams()` 写日志并返回 `False` → `main()` 返回 1 |
+| 客户端无条件拉 `resources/list` / `prompts/list` | 回空清单而不是 `-32601`：个别客户端拿到方法不存在会把整个服务标记为不可用 |
+| 任何遗留 `print` / 第三方库输出 | `_isolate_stdout()`：协议句柄存局部变量，`sys.stdout` 改指 stderr |
+| 客户端塞进非 UTF-8 字节 | stdin `errors="replace"`；`serve()` 捕获解码/读错误后结束会话而不是抛栈 |
+| 通道被设置页关闭 | `main()` 在建 Service 之前拒绝，原因写 stderr，**stdout 保持干净**，退出码 1 |
 
-最后一条的实际意义：`console=False` 的 exe 在无管道环境下 `sys.stdin` 是 `None`，直接 `readline()` 会 `AttributeError` 崩得莫名其妙。现在是明确的错误日志 + 非零退出码。
+**为什么 stdout 必须隔离**：MCP stdio 的帧就是"一行一个 JSON"。只要有任意一行非 JSON 混进 stdout，客户端就会 `JSON.parse` 失败或直接断开连接 —— 排查起来极难，因为是自己代码里一句遗留的 `print`。把协议通道单独摘出来是 LSP / MCP server 的通行做法：
+
+```python
+proto = sys.stdout          # 只给协议用
+sys.stdout = sys.stderr     # 其余输出(含日志、库的 print)统统去 stderr
+serve(server, sys.stdin, proto)
+```
+
+**为什么非法字节不能抛栈**：一行坏字节把进程打崩,客户端看到的是"服务意外退出",而真正原因(编码)藏在 traceback 里。实测:`serve()` 原来用 `iter(stdin.readline, "")`,遇到 `ÿþ` 直接 `UnicodeDecodeError`;改成显式 `readline()` + `try/except` 后,坏行降级成 `-32700 Parse error` 响应,会话继续。
 
 ### 7.7 `downloader.py` — 下载编排
 
@@ -445,7 +491,7 @@ def _write_text_retry(path, text, attempts=6):
 
 ## 8. 数据契约
 
-### 8.1 设置（14 项）
+### 8.1 设置（16 项）
 
 ```jsonc
 {
@@ -462,9 +508,15 @@ def _write_text_retry(path, text, attempts=6):
   "cookies_from_browser": "",
   "cookie_file": "",
   "proxy": "",
-  "workers": 2                    // 1~6
+  "workers": 2,                   // 1~6
+  "enable_cli": true,             // CLI 通道开关(仅桌面端可改)
+  "enable_mcp": true              // MCP 通道开关(仅桌面端可改)
 }
 ```
+
+后两项**不在 `OVERRIDABLE_SETTINGS` 里**：`--set` 与 MCP 的 `update_settings` 都会拒绝它们。理由不是洁癖 —— 一旦允许写，一个被提示注入的 AI 就能先 `update_settings(enable_mcp=true)` 长期留在机器上，或反过来把自己锁死来制造"服务坏了"的假象。权限边界放在人这一侧。
+
+读取方（`channel_block_reason`）直接读 `settings.json` 而不构造 `Service`：通道关闭时不该去开数据库、白建 pipeline。解析失败时按默认值放行 —— 这道开关用于收敛外部调用面，不是抗篡改边界（能改文件的人本就能改回来），而把配置搞坏的用户若连 CLI 都进不去反而更难自救。
 
 ### 8.2 任务记录（SQLite `jobs` 表）
 
@@ -529,6 +581,10 @@ if info.total_parts > 1:
 | JSON 崩溃 JS 端 | 出站统一 `json_safe` + `allow_nan=False` |
 | 打包 exe 编码崩溃 | stdout 编码探测 + `ensure_ascii` 降级 + `backslashreplace` |
 | 双进程抢任务 | `CreateMutexW` 单实例 + `_scheduled` 去重 |
+| 通道被随意开关 | 两个开关只在桌面端可写，`--set` / `update_settings` 拒绝 |
+| 桌面端与 AI 同时写库 | `PRAGMA busy_timeout=5000`（WAL 单写者，撞锁改为等锁） |
+| 第三方库 print 污染 MCP 协议 | `_isolate_stdout()` 把 `sys.stdout` 改指 stderr，协议句柄单独持有 |
+| 客户端塞非 UTF-8 字节 | stdin `errors="replace"` + `serve()` 捕获解码/读错误，降级为 `-32700` 而非崩进程 |
 | 僵尸任务 | 启动恢复全部 `ACTIVE_STATUSES` + `wait()` 的 stalled 检测 |
 | Cookie 泄露 | 只在下载时交给 yt-dlp，不进日志、不打包 |
 | 扫描/删除误伤 | `scripts/bdelete/` 等工具要求显式路径，不做通配删除 |
@@ -589,7 +645,7 @@ python scripts/release.py --single-only# 仅重建单文件版
 
 ## 12. 测试体系
 
-`tests/` 共 **24 个文件 / 346 用例**，全绿耗时约 200 秒。
+`tests/` 共 **24 个文件 / 369 用例**，全绿约 1~3 分钟。
 
 | 领域 | 文件 | 策略 |
 |---|---|---|

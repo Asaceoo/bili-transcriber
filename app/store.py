@@ -53,6 +53,11 @@ class Store:
     def _init_schema(self) -> None:
         with self._lock, self._conn:
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # 桌面端 + CLI/MCP 是两个进程写同一个 history.db(WAL 只允许一个写者)。
+            # sqlite3 默认 busy_timeout=0,撞上就直接抛 "database is locked" ——
+            # 实测:一个连接持写锁时另一个 INSERT 立刻 OperationalError,任务
+            # 状态更新失败会让前端永远停在"转写中"。给 5 秒等锁窗口。
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -171,6 +176,10 @@ DEFAULT_SETTINGS = {
     "cookie_file": "",            # cookies.txt 文件路径(Netscape 格式,优先于浏览器 Cookie)
     "proxy": "",                  # 网络代理(YouTube 等境外平台需要),如 http://127.0.0.1:7890 或 socks5://…
     "workers": 2,                 # 下载/转码并发工作线程数(1~6,转写始终串行保护 GPU)
+    # 外部调用通道开关:只由桌面端设置页维护,CLI/MCP 自身无法修改(避免被
+    # 提示注入的 AI 打开/关闭自己的通道)。默认开启,升级后行为与旧版一致。
+    "enable_cli": True,           # 允许命令行/脚本调用(--cli / bili-transcriber-cli)
+    "enable_mcp": True,           # 允许 MCP 客户端(AI 软件)调用(--mcp)
 }
 
 
@@ -190,6 +199,8 @@ class Settings:
     cookie_file: str = DEFAULT_SETTINGS["cookie_file"]
     proxy: str = DEFAULT_SETTINGS["proxy"]
     workers: int = DEFAULT_SETTINGS["workers"]
+    enable_cli: bool = DEFAULT_SETTINGS["enable_cli"]
+    enable_mcp: bool = DEFAULT_SETTINGS["enable_mcp"]
 
     def resolve_output_dir(self, base_dir: Path) -> Path:
         p = Path(self.output_dir)

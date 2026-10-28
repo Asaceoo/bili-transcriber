@@ -355,9 +355,33 @@ Key points:
 
 Worth enabling for: tech talks, open courses, lectures — anything with text on screen. Pointless for pure talk, podcasts, interviews.
 
-### 7.6 Restore Defaults
+### 7.6 CLI and MCP Channel Switches
 
-Resets every setting to factory values, including the output directory back to `output/`.
+Further down the Settings tab is an **AI Calls and CLI** section with two switches, **both on by default**:
+
+| Switch | When on | When off |
+|---|---|---|
+| Allow CLI calls | scripts / terminals can run `--cli` | refuses with an explanatory error, exit code **3** |
+| Allow MCP calls | AI apps can run `--mcp` | server refuses to start, exit code **1**, reason on stderr |
+
+When to turn them off:
+
+- you only use the desktop UI and don't want any external program touching transcription;
+- you're debugging and want to rule out an AI client quietly running jobs;
+- you're lending the machine to someone.
+
+Behaviour you must know:
+
+- **New processes only.** The switch governs CLI/MCP processes started *after* the change; an already-connected AI client must reconnect. The desktop app itself is always available.
+- **Desktop-only.** `--set enable_cli=false` and the MCP `update_settings` tool both reject these two keys ("modify from the desktop settings page"). That is deliberate: a prompt-injected AI must not be able to open its own door.
+- **Save it.** Like every other setting, tick then press **Save settings**.
+- **Locked out?** Edit `data/settings.json` and set `enable_cli` / `enable_mcp` back to `true` — it is plain JSON.
+
+The same section has an **MCP client config** panel: expand it, press *Copy config*, and paste the `mcpServers` snippet into your AI client. The command path is filled in automatically (`xxx.exe --mcp` for packaged builds, `python -m app.mcp_server` from source).
+
+### 7.7 Restore Defaults
+
+Resets every setting to factory values, including the output directory back to `output/` and both channel switches back to on.
 
 It does **not** delete your models, history, or output files.
 
@@ -481,6 +505,17 @@ bili-transcriber-cli --prewarm --json
 
 See the "Command-Line Reference" section of the README for the full table.
 
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | job failed / execution error (including invalid values) |
+| 2 | bad arguments (missing value, conflicting flags) |
+| 3 | channel disabled in Settings |
+
+`--json` output is always valid JSON (NaN/Infinity become `null`), and an early pipe close (`… | head -1`) no longer prints a traceback.
+
 Tasks submitted with `--no-wait` are not lost: **the next desktop launch resumes every leftover in-progress task**, including ones killed mid-run.
 
 ### 10.2 MCP (for AI clients)
@@ -496,6 +531,10 @@ Add this to your client's MCP config (WorkBuddy, Claude Code, DeepSeek-Honey, �
 Then just say "transcribe this link" and the client drives the tools itself.
 
 Nine tools are exposed: `transcribe`, `wait_jobs`, `job_status`, `list_jobs`, `get_transcript`, `cancel_job`, `prewarm_model`, `get_settings`, `update_settings`.
+
+When the MCP switch is off, the server **never enters the protocol loop**: it exits with code 1, prints the reason on stderr and keeps stdout clean — the client reports "server failed to start", and that stderr line tells you why.
+
+Two interop details: `resources/list` and `prompts/list` return empty lists instead of `-32601` (some clients otherwise mark the whole server unusable), and every non-protocol write — including stray `print` calls from third-party libraries — is redirected to stderr so JSON-RPC framing stays intact.
 
 Details in [ai-integration.md](ai-integration.md).
 
@@ -584,6 +623,10 @@ Yes — enter an absolute path. On save the app runs a **write probe** (it actua
 | SSL certificate errors | Broken system cert chain | Self-healing runs at startup; usually nothing to do |
 | GPU pack installed but unused | Wrong extraction depth (flattened or one level too deep) | Verify `gpu\nvidia\cublas\bin\cublas64_12.dll` exists |
 | Outputs can't be written | Permissions / antivirus | Change the output dir; atomic writes retry, but long antivirus locks still fail |
+| CLI exits at once, says the channel is disabled in desktop Settings | CLI switch is off | Tick it in Settings and save; or set `enable_cli` to `true` |
+| AI client shows the MCP server as "failed to connect" | MCP switch is off, or wrong command | Read the stderr line; the config must be `xxx.exe --mcp` |
+| `update_settings` reports an unsupported setting | You tried `enable_cli` / `enable_mcp` | Desktop-only by design |
+| `database is locked` when desktop and AI run together | Old build without lock wait | Fixed in 0.1.40 (5 s `busy_timeout`); upgrade |
 
 ### 12.3 Full Reset
 

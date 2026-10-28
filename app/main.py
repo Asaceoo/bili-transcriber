@@ -65,6 +65,21 @@ def _has_webview2() -> bool:
 _instance_mutex = None  # 进程存活期间保持句柄,进程退出由 OS 释放
 
 
+def _is_spawn_child() -> bool:
+    """当前是否 NiceGUI/multiprocessing 派生出来的子进程。
+
+    子进程会重新执行本模块的 `__mp_main__` 分支(因而再次走到 main()),
+    它不是"第二个实例":若也去抢互斥体,必然抢不到,然后按"已有实例"分支
+    再开一次浏览器 —— 真机日志里每次启动都多出
+    `__mp_main__: 已有实例在运行,本进程退出` 一行,浏览器也被多开一个。
+    """
+    try:
+        import multiprocessing
+        return multiprocessing.current_process().name != "MainProcess"
+    except Exception:  # noqa: BLE001 — 判断不了就当作主进程
+        return False
+
+
 def _acquire_single_instance() -> bool:
     """同一 data 目录只允许一个桌面实例;返回 False 表示已有实例在跑。
 
@@ -74,7 +89,7 @@ def _acquire_single_instance() -> bool:
     无界面模式(CLI/MCP)不经过这里:它们本就该与桌面端共享同一份历史。
     """
     global _instance_mutex
-    if sys.platform != "win32":
+    if sys.platform != "win32" or _is_spawn_child():
         return True
     try:
         import ctypes

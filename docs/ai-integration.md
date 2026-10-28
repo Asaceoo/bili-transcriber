@@ -110,8 +110,9 @@ bili-transcriber-cli --cancel BV1xx411c7mD_p1
 
 - 传输:stdio,换行分隔 JSON-RPC 2.0(标准 MCP stdio)。
 - 协议版本:支持 `2025-06-18` / `2025-03-26` / `2024-11-05`(自动协商)。
-- 能力:仅 `tools`(无 resources/prompts)。
-- 所有日志写 stderr 与 `%LOCALAPPDATA%\Bili Note\logs\app.log`,stdout 只输出协议数据。
+- 能力:仅 `tools`(无 resources/prompts)。对客户端的 `resources/list` / `prompts/list` 请求回**空清单**而非 `-32601`,避免个别客户端把服务标成不可用。
+- 所有日志写 stderr 与 `%LOCALAPPDATA%\Bili Note\logs\app.log`,stdout 只输出协议数据。**协议实现层做了 stdout 隔离**:`sys.stdout` 被改指向 stderr,协议句柄单独持有,任何遗留 `print` / 第三方库输出都不会插进 JSON 帧。
+- 通道开关:桌面端「设置 → AI 调用与命令行」可关闭 MCP。关闭时进程不进入协议循环,退出码 1,原因写 stderr,stdout 保持干净。
 
 ### 2.2 客户端配置
 
@@ -213,6 +214,9 @@ get_transcript(media_id)
 | `解析失败:...` | 链接失效/需要登录/网络不可达;检查 cookies 与代理设置 |
 | `尚无 md 产物` | 任务尚未完成或失败;先 `job_status` 看 `status`/`error` |
 | 中文乱码 | 客户端需按 UTF-8 解析 stdio;服务端已强制 UTF-8 输出 |
+| 启动即退出,stderr 说「通道已在桌面端「设置」中关闭」 | 设置页关掉了 MCP 开关,勾回来保存即可(或把 `settings.json` 的 `enable_mcp` 改 `true`) |
+| 日志里出现 `database is locked` | 0.1.39 及更早:桌面端与 MCP 同时写 `history.db` 撞锁。0.1.40 起 `busy_timeout=5000`,升级即可 |
+| 客户端把整段会话断开 | 旧版遇到非 UTF-8 字节会崩;0.1.40 起降级为 `-32700` 解析错误并继续 |
 
 ---
 
