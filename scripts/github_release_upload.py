@@ -1,10 +1,12 @@
 """GitHub Release 上传:创建/复用 release 并上传资产(无 gh CLI 环境用)。
 
 用法:
-    python scripts/github_release_upload.py <tag> <资产1> [资产2 ...]
+    python scripts/github_release_upload.py <tag> <资产1> [资产2 ...] [--notes 说明.md]
 
 - token 从 git credential manager(https://github.com)获取,不落盘。
 - release 已存在(422)时自动复用;同名资产已存在时先删再传(覆盖语义)。
+- `--notes` 指定更新说明文件(Markdown),创建时作为 release 正文;
+  复用已有 release 时也会 PATCH 覆盖正文,避免说明与产物版本脱节。
 """
 
 from __future__ import annotations
@@ -64,11 +66,24 @@ def _api(method: str, url: str, token: str, data: dict | bytes | io.BufferedRead
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
+    argv = sys.argv[1:]
+    notes_text = ""
+    if "--notes" in argv:
+        i = argv.index("--notes")
+        if i + 1 >= len(argv):
+            print("--notes 需要跟一个文件路径")
+            sys.exit(2)
+        notes_path = Path(argv[i + 1])
+        if not notes_path.is_file():
+            print(f"说明文件不存在: {notes_path}")
+            sys.exit(2)
+        notes_text = notes_path.read_text(encoding="utf-8")
+        del argv[i:i + 2]
+    if len(argv) < 2:
         print(__doc__)
         sys.exit(2)
-    tag = sys.argv[1]
-    assets = [Path(p) for p in sys.argv[2:]]
+    tag = argv[0]
+    assets = [Path(p) for p in argv[1:]]
     for a in assets:
         if not a.is_file():
             print(f"资产不存在: {a}")
@@ -80,18 +95,22 @@ def main() -> None:
     if status == 200 and rel:
         release_id, upload_url = rel["id"], rel["upload_url"].split("{")[0]
         print(f"[release] 复用已有 release {tag} (id={release_id})")
+        if notes_text and rel.get("body") != notes_text:
+            st, _ = _api("PATCH", f"{API}/releases/{release_id}", tok,
+                         data={"body": notes_text})
+            print(f"[release] 更新说明已覆盖 (HTTP {st})")
     else:
         status, rel = _api("POST", f"{API}/releases", tok, data={
             "tag_name": tag,
             "target_commitish": "main",
             "name": f"bili-transcriber {tag}",
-            "body": (f"bili-transcriber {tag} 发布产物。\n\n"
-                     "- `bili-transcriber-setup-*.exe` 安装版\n"
-                     "- `bili-transcriber-single-*.exe` 单文件便携版\n"
-                     "- `bili-transcriber-portable-*.zip` 便携包\n"
-                     "- `bili-transcriber-gpu-*.zip` GPU 加速包(可选)\n"
-                     "- `*-skill-*.zip` 配套 AI 智能体技能包\n\n"
-                     "详见仓库 docs/ 用户手册与技术手册。"),
+            "body": notes_text or (
+                f"bili-transcriber {tag} 发布产物。\n\n"
+                "- `bili-transcriber-setup-*.exe` 安装版\n"
+                "- `bili-transcriber-single-*.exe` 单文件便携版\n"
+                "- `bili-transcriber-portable-*.zip` 便携包\n"
+                "- `bili-transcriber-gpu-*.zip` GPU 加速包(可选)\n\n"
+                "详见仓库 docs/ 用户手册与技术手册。"),
             "draft": False,
             "prerelease": False,
         })
