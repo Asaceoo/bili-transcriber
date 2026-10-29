@@ -46,16 +46,50 @@
 | `get_transcript format="yaml"` | — | 可读错误"不支持的格式" |
 | `tools/call` 的 `arguments` 传字符串 | — | "arguments 必须是对象" |
 
+## 第四轮（v0.1.43 发布后复审）：三视角再收敛
+
+上轮修复后全量测试全绿，本轮换攻击面复审 —— 又抓出 **4 个测试全绿仍漏网的真 bug**，
+全部以真实执行取证据、修复后复跑收敛：
+
+### 实现者视角
+
+| # | 发现 | 真实证据 | 修复 | 复验 |
+|---|---|---|---|---|
+| 4.1 | `serve_cli()` 用 `sys.stdout` 但模块没 import sys —— **真实 `--mcp-http` 路径一跑即 NameError**，而 517 项测试全绿（测试只盖 `McpHttpServer` 类，CLI 包装入口零覆盖） | 真机跑 `--mcp-http 8791` 即崩 `NameError: name 'sys' is not defined` | 补 `import sys`；新增子进程端到端回归（stdout 端点行 + POST initialize） | 真机全通；518→522 passed |
+| 4.2 | HTTP Handler 无读写超时 —— 半开连接（只发半个头）永久占住一条线程 | 代码走查（BaseHTTPRequestHandler 默认 `timeout=None`） | `Handler.timeout = 60` | slowloris 场景线程 60s 自愈 |
+| 4.3 | token 比较用 `==`，理论上有时序侧信道 | 代码走查 | `hmac.compare_digest` | 行为不变，测试全过 |
+
+### 审查者视角
+
+| # | 发现 | 真实证据 | 修复 | 复验 |
+|---|---|---|---|---|
+| 4.4 | `merge_toml` 只精确匹配 `[mcp_servers.bili-transcriber]` —— 用户手写行尾注释/空格变体即漏匹配 → 旧 section 不替换 + 新块追加 = **TOML 同名 table 两份，Codex 解析直接失败，整个 config.toml 坏**（正是 2.2 担心的"陪葬"场景） | 闭环脚本：`tomllib PARSE-FAIL: Cannot declare ('mcp_servers','bili-transcriber') twice`；连带发现 skipping 状态遇 `[other] # 注释` 不退出、会把用户下一个 section 吞掉 | section 头按 `#` 截断再比较（头行无字符串字面量，安全）；skipping 退出条件同源修复 | tomllib 解析 OK、旧/新/第三 section 内容全保真；回归测试锁定 |
+| 4.5 | `do_DELETE` 无 Origin/token 校验 —— POST 设防了，DELETE 裸奔，外部网页可经浏览器清空会话 | 真实 socket：带 `token=sekrit` 的服务 DELETE 无鉴权照样 204 | DELETE 与 POST 同等校验（Origin 403 / token 401） | 无 token 401 / 外部 Origin 403 / 本机 Origin 204（真实 HTTP 三连） |
+
+### AI 使用方视角
+
+| # | 发现 | 真实证据 | 修复 | 复验 |
+|---|---|---|---|---|
+| 4.6 | `render_cli(frozen=True)` 生成的示例命令带**非法 `--cli` 参数** —— AI 复制粘贴即 `unrecognized arguments` | 真机 `bili-transcriber.exe --cli ...` 报错；片段渲染复现 | 片段去掉 `--cli`（CLI 无需该参数） | frozen/源码两形态片段均无 `--cli`；回归锁定 |
+| 4.7 | `--agent-config --write` 遇 JSONC 配置（Cursor/VS Code 的 mcp.json 常带 `//` 注释）→ 裸 JSONDecodeError traceback，AI 无从下手 | 闭环脚本：`JSONDecodeError: Expecting property name...`（原文件 intact） | 捕获后抛 ValueError：指明"文件含注释、原文件未动、粘贴这段片段"；片段随错误给出 | 报错含"注释"+"mcpServers"+片段；回归锁定 |
+| 4.8 | 11 工具边界值轰炸（未知工具/非字符串 name/超大与负 timeout/负 limit/空 keyword/非法 mode/10MB keyword） | 真实 stdio 管道逐个喂：全部返回可读 `isError` 结构或夹紧生效，零 traceback 泄漏 | 无需修 —— 夹紧与校验层经此轮加固后已达标 | 8+3 用例期望行为逐项匹配 |
+
+### 本轮方法论教训
+
+- **测试全绿 ≠ 真机可用**：4.1/4.4/4.6 三个 bug 都在"测试覆盖不到的组装层"（CLI 入口、用户手写的配置变体、文档片段）。CLI 包装入口必须至少一条子进程级 e2e。
+- **配对操作要同防**：4.5 —— 给 POST 上锁时问一句"DELETE/GET 呢"。
+- **用户手写配置是脏数据**：4.4/4.7 —— 合并逻辑必须容忍注释、空格、JSONC，容忍不了就明确拒绝并给出路。
+
 ## 兜底校验清单（发布前逐项打勾）
 
 - [x] stdio：initialize → tools/list（11 工具）→ tools/call 全链路真实管道通过
 - [x] HTTP：initialize(返 session)/tools/list/SSE/GET 405/坏 JSON 400/跨站 403/未知 session 404/DELETE 204/healthz 200 —— 十项真实 socket 闭环
-- [x] Bearer token 开启后：无 token 401 / 错 token 401 / 对 token 200
+- [x] Bearer token 开启后：无 token 401 / 错 token 401 / 对 token 200；DELETE 同样受 Origin+token 管控（4.5）
 - [x] `--doctor` 真机输出正确路径与客户端表
-- [x] `--agent-config` 8 种客户端 × stdio/http 渲染正确；`--write` 有 `.bak` 备份；DSH 拒绝直写
-- [x] `--mcp-http` 真机起服（curl healthz 200 + POST ping 有响应 + stdout 打印端点行）
+- [x] `--agent-config` 8 种客户端 × stdio/http 渲染正确；`--write` 有 `.bak` 备份；DSH 拒绝直写；JSONC 配置给可行动报错（4.7）；TOML 合并容忍行尾注释（4.4）
+- [x] `--mcp-http` 真机起服（curl healthz 200 + POST ping 有响应 + stdout 打印端点行）—— 含子进程级 e2e 回归（4.1）
 - [x] MCP 通道门禁：设置页关闭时 `--mcp` 与 `--mcp-http` 同样被拦（退出码 3）
-- [x] 全量 pytest 512+ 通过（新增 HTTP 17 / agent_setup 21 / server 工具 12 / CLI 13）
+- [x] 全量 pytest 522 通过（第四轮新增回归 4：serve_cli e2e / merge_toml 注释 / JSONC 报错 / DELETE 鉴权）
 
 ## 遗留与已知限制（不阻塞发布）
 

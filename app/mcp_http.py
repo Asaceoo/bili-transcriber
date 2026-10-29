@@ -213,7 +213,11 @@ class McpHttpServer:
         if not header:
             return False
         parts = header.split(None, 1)
-        return len(parts) == 2 and parts[0].lower() == "bearer" and parts[1].strip() == self.token
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return False
+        # compare_digest 防时序侧信道;本机服务风险低,但成本为零
+        import hmac
+        return hmac.compare_digest(parts[1].strip().encode(), self.token.encode())
 
     def handle_message(self, payload: Any) -> tuple[Any, str | None]:
         """处理一条 JSON-RPC 消息;返回 (响应, 新建的 session id)。
@@ -234,6 +238,9 @@ def _make_handler(owner: McpHttpServer) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = f"bili-transcriber/{APP_VERSION}"
         protocol_version = "HTTP/1.1"
+        # 单请求读写超时:BaseHTTPRequestHandler 默认 None,慢速客户端
+        # (半开的连接只发半个头)会永久占住一条 ThreadingHTTPServer 线程
+        timeout = 60
 
         # ---------- 基础工具 ----------
 
@@ -309,6 +316,14 @@ def _make_handler(owner: McpHttpServer) -> type[BaseHTTPRequestHandler]:
                        {"Allow": "POST, DELETE, OPTIONS"})
 
         def do_DELETE(self) -> None:  # noqa: N802
+            # DELETE 也会改状态(销毁会话),与 POST 同等校验:
+            # 不设防时,外部网页可借浏览器直接打 127.0.0.1 清掉全部会话
+            if not _origin_allowed(self.headers.get("Origin")):
+                self._jsonrpc_error(403, -32600, "拒绝跨站请求(Origin 非本机)")
+                return
+            if not owner.check_auth(self.headers.get("Authorization")):
+                self._jsonrpc_error(401, -32600, "缺少或错误的 Bearer token")
+                return
             path = urlparse(self.path).path.rstrip("/")
             if path != "/mcp":
                 self._send(404, b'{"error":"not found"}')

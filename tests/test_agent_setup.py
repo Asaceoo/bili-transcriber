@@ -1,6 +1,8 @@
 """agent_setup 测试:客户端解析、配置渲染、合并写入、本机探测。"""
 
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -235,3 +237,42 @@ def test_codex_toml_has_no_invented_keys():
     text = render(CLIENTS["codex"], frozen=False)
     assert "startup_timeout_sec = 300" in text
     assert "tool_timeout_sec =" not in text  # 想当然的键不允许落进配置
+
+
+def test_merge_toml_replaces_section_with_trailing_comment():
+    """回归:带行尾注释的旧 section 曾被漏匹配 → TOML 重复 table,Codex 全崩。"""
+    from app.agent_setup import merge_toml, render_toml, CLIENTS
+    import tomllib
+    block = render_toml(CLIENTS["codex"], {"command": "X://new//b.exe", "args": ["--mcp"]})
+    old = ("[mcp_servers.other]\ncommand = 'keep-me'\n\n"
+           "[mcp_servers.bili-transcriber] # 用户注释\ncommand = 'old'\n\n"
+           "[mcp_servers.third] # 别的注释\nmodel = 'keep-me-too'\n")
+    merged = merge_toml(old, block)
+    data = tomllib.loads(merged)  # 解析失败会抛异常
+    assert data["mcp_servers"]["bili-transcriber"]["command"] == "X://new//b.exe"
+    assert data["mcp_servers"]["other"]["command"] == "keep-me"
+    assert data["mcp_servers"]["third"]["model"] == "keep-me-too"
+    assert merged.count("[mcp_servers.bili-transcriber]") == 1
+
+
+def test_write_config_jsonc_gives_actionable_error():
+    """回归:JSONC(带注释)配置曾泄漏 JSONDecodeError traceback。"""
+    from app.agent_setup import write_config, render, resolve_client
+    spec = resolve_client("cursor")
+    snippet = render(spec)
+    with tempfile.TemporaryDirectory() as td:
+        target = Path(td) / "mcp.json"
+        target.write_text("{\n  // 我的注释\n  \"mcpServers\": {}\n}\n", encoding="utf-8")
+        before = target.read_text(encoding="utf-8")
+        with pytest.raises(ValueError) as ei:
+            write_config(spec, snippet, path=target)
+        assert "注释" in str(ei.value) and "mcpServers" in str(ei.value)
+        assert target.read_text(encoding="utf-8") == before  # 原文件未动
+
+
+def test_render_cli_frozen_has_no_cli_flag():
+    """回归:frozen 片段曾生成非法 --cli 参数,客户端复制即报错。"""
+    from app.agent_setup import render_cli
+    text = render_cli(frozen=True, exe="bili-transcriber.exe")
+    assert "--cli" not in text
+    assert "bili-transcriber.exe" in text

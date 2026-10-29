@@ -311,3 +311,33 @@ def test_serve_cli_subprocess_end_to_end():
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_delete_requires_origin_and_token():
+    """回归:DELETE 曾无 Origin/token 校验,外部网页可经浏览器清会话。"""
+    srv = McpHttpServer(port=0, token="sekrit")
+    srv.start()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        base = f"http://127.0.0.1:{srv.port}/mcp"
+
+        # 无 token → 401
+        req = urllib.request.Request(base, method="DELETE")
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            opener.open(req, timeout=10)
+        assert ei.value.code == 401
+
+        # 有 token 但 Origin 外部 → 403
+        req = urllib.request.Request(base, method="DELETE", headers={
+            "Authorization": "Bearer sekrit", "Origin": "https://evil.example"})
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            opener.open(req, timeout=10)
+        assert ei.value.code == 403
+
+        # token + 本机 Origin → 204
+        req = urllib.request.Request(base, method="DELETE", headers={
+            "Authorization": "Bearer sekrit", "Origin": "http://127.0.0.1:5173"})
+        with opener.open(req, timeout=10) as r:
+            assert r.status == 204
+    finally:
+        srv.stop()

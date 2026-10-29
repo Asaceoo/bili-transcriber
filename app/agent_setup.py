@@ -180,7 +180,7 @@ def render_cli(*, exe: str | None = None, frozen: bool | None = None) -> str:
     """只能执行 shell 的 Agent 用的命令片段(POSIX + PowerShell 两版)。"""
     is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if is_frozen:
-        base = f'"{exe or "bili-transcriber.exe"}" --cli'
+        base = f'"{exe or "bili-transcriber.exe"}"'
     else:
         base = "python -m app.cli"
     return (
@@ -257,15 +257,17 @@ def merge_toml(existing_text: str, block: str) -> str:
     replaced = False
     for line in lines:
         stripped = line.strip()
-        if stripped == _TOML_HEADER:
+        head = stripped.split("#", 1)[0].strip()  # section 头行没有字符串字面量,按 # 截断安全
+        is_any_header = head.startswith("[") and head.endswith("]")
+        if not skipping and head == _TOML_HEADER:
             skipping = True
             if not replaced:
                 out.extend(block.rstrip("\n").splitlines())
                 replaced = True
             continue
         if skipping:
-            if stripped.startswith("[") and stripped.endswith("]"):
-                skipping = False  # 进入下一个 section,开始照抄
+            if is_any_header:
+                skipping = False  # 进入下一个 section(含带注释的头),开始照抄
             else:
                 continue
         out.append(line)
@@ -287,12 +289,19 @@ def write_config(spec: ClientSpec, snippet: str, *, path: Path | None = None,
         raise ValueError(f"{spec.label} 没有默认配置路径,请手动粘贴")
     target.parent.mkdir(parents=True, exist_ok=True)
     existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    backup = _backup(target)
     if spec.fmt == "toml":
         merged = merge_toml(existing, snippet)
     else:
         entry = _entry_from_snippet(spec, snippet)
-        merged = merge_json(existing, spec, entry)
+        try:
+            merged = merge_json(existing, spec, entry)
+        except json.JSONDecodeError as exc:
+            # Cursor/VS Code 的 mcp.json 常是 JSONC(带 // 注释),json 解析会炸;
+            # 报"往哪粘"比裸 traceback 可行动 —— 原文件一个字节都没动。
+            raise ValueError(
+                f"{target} 不是纯 JSON(常见原因:文件里有 // 或 /* 注释),"
+                f"为避免改坏你的注释,请手动粘贴下面的片段:\n{snippet}") from exc
+    backup = _backup(target)
     target.write_text(merged, encoding="utf-8")
     return {"ok": True, "client": spec.key, "path": str(target),
             "backup": str(backup) if backup else "", "created": not bool(existing)}
