@@ -354,4 +354,5 @@ def test_set_settings_rejects_empty_output_dir(service):
     """空 output_dir 会被解析成程序根目录,产物散落到源码树里,必须当场拒绝。"""
     with pytest.raises(ServiceError) as ei:
         service.set_settings(output_dir="   ")
-    assert "不能为空" in str(ei.value)
+    # 统一空串守卫(见 set_settings):文案含键名与"空串",拒绝语义不变
+    assert "output_dir" in str(ei.value) and "空串" in str(ei.value)

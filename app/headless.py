@@ -66,6 +66,7 @@ def _validate_settings(changes: dict) -> list[str]:
             raise ServiceError("output_dir 不能为空(留空不等于使用默认值)")
         target = Path(str(out)).expanduser()
         try:
+            target = target.resolve()  # 相对路径 absolute 化:落盘后 CWD 变了也不漂移
             target.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise ServiceError(f"output_dir 无法创建:{target}({exc})") from exc
@@ -386,10 +387,11 @@ class Service:
                 text = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if keyword not in text:
+            kw_lower = keyword.lower()
+            if kw_lower not in text.lower():
                 continue
             # 每个 job 只取首个命中,避免长视频把 limit 全吃光
-            idx = text.lower().find(keyword.lower())
+            idx = text.lower().find(kw_lower)
             if idx < 0:
                 continue
             start = max(0, idx - context_chars // 2)
@@ -453,6 +455,13 @@ class Service:
     def set_settings(self, **changes: Any) -> dict:
         """持久化设置到 data/settings.json(GUI 与后续进程同样生效)。"""
         clean = {k: v for k, v in changes.items() if v is not None}
+        empties = [k for k, v in clean.items() if isinstance(v, str) and not v.strip()]
+        if empties:
+            # AI 传 engine="" 想表达"重置默认",但空串落盘后转写选择/路径解析
+            # 行为未定义 —— 与 output_dir 同一哲学:当场拒绝,传空串不会重置
+            raise ServiceError(
+                f"设置项不能传空串(空串不会重置为默认值,要改请给合法值,不改请别传):"
+                f"{', '.join(empties)}")
         unknown = [k for k in clean if k not in OVERRIDABLE_SETTINGS]
         if unknown:
             # 通道开关(enable_cli/enable_mcp)故意落在这里:它们只归桌面端。

@@ -510,3 +510,66 @@ def test_transcribe_timeout_is_clamped(server, monkeypatch):
                    "params": {"name": "transcribe", "arguments": {
                        "source": "BV1x", "wait": True, "timeout_sec": 1e9}}})
     assert seen["timeout"] == 86400.0  # 1e9 被夹到一天,不会挂死服务
+
+
+def test_search_is_case_insensitive_end_to_end():
+    """回归:search 曾用区分大小写的 in 短路 lower().find —— 大小写不敏感完全失效。"""
+    import tempfile
+    from pathlib import Path
+    from app.headless import Service
+    from app.store import Store, Job
+
+    td = tempfile.mkdtemp()
+    try:
+        data = Path(td) / "data"
+        data.mkdir()
+        store = Store(data / "history.db")
+        art = Path(td) / "out"
+        art.mkdir()
+        (art / "BV1xx411c7mD_p1.md").write_text(
+            "# 讲座\n\n今天讲 Transformer 架构。\n", encoding="utf-8")
+        store.upsert_job(Job(media_id="BV1xx411c7mD_p1", bv="BV1xx411c7mD",
+                             title="t", uploader="u", duration=1.0, url="u",
+                             status="done",
+                             md_path=str(art / "BV1xx411c7mD_p1.md"),
+                             txt_path=str(art / "BV1xx411c7mD_p1.txt")))
+        svc = Service(store=store, base_dir=td)
+        assert svc.search("transformer")["count"] == 1  # 小写搜大写原文必须命中
+        assert svc.search("Transformer")["count"] == 1
+        assert svc.search("TRANSFORMER")["count"] == 1
+        assert svc.search("不存在词xyz")["count"] == 0
+    finally:
+        try:
+            svc.store.close()
+        except Exception:  # noqa
+            pass
+
+
+def test_set_settings_rejects_empty_string():
+    """回归:engine="" 等空串曾直接落盘,转写选择/路径解析行为未定义。"""
+    import tempfile
+    from pathlib import Path
+    from app.headless import Service, ServiceError
+
+    td = tempfile.mkdtemp()
+    try:
+        base = Path(td)
+        (base / "data").mkdir()
+        svc = Service(base_dir=base)
+        with pytest.raises(ServiceError) as ei:
+            svc.set_settings(engine="")
+        assert "空串" in str(ei.value) and "engine" in str(ei.value)
+        # 正常值不受影响
+        svc.set_settings(language="zh")
+        assert svc.get_settings()["language"] == "zh"
+    finally:
+        svc.close()
+
+
+def test_validate_settings_output_dir_resolves_relative():
+    """回归:相对路径 output_dir 曾原样落盘,CWD 变化后产物漂移。"""
+    from pathlib import Path
+    from app.headless import _validate_settings
+    changes = {"output_dir": "some_relative_dir"}
+    _validate_settings(changes)
+    assert Path(changes["output_dir"]).is_absolute()

@@ -80,6 +80,20 @@
 - **配对操作要同防**：4.5 —— 给 POST 上锁时问一句"DELETE/GET 呢"。
 - **用户手写配置是脏数据**：4.4/4.7 —— 合并逻辑必须容忍注释、空格、JSONC，容忍不了就明确拒绝并给出路。
 
+## 第五轮（第四轮后再收敛）：换攻击面复审
+
+攻击面转向 `Service.search / set_settings / _validate_settings / _toml_str / normalize_source`
+（前三轮未深查的服务层），又收敛 3 项：
+
+| # | 视角 | 发现 | 真实证据 | 修复 | 复验 |
+|---|---|---|---|---|---|
+| 5.1 | 实现者 | `search()` 第一步用**区分大小写**的 `in` 做快速排除,第二步才用 `lower().find()` —— 意图是大小写不敏感,实际被第一步短路,**完全失效** | 真实库写入含 "Transformer" 的稿,search "transformer" 命中 0(同大小写命中 1) | 快速排除改用 `kw_lower not in text.lower()`,与查找同一比较基准 | 三种大小写全命中;真机 `--grep "the"` 命中真实转写稿 |
+| 5.2 | 审查者 | `_validate_settings` 对 `output_dir` 只 `expanduser` 不 `resolve` —— 相对路径原样落盘,长驻 MCP 进程与 CLI 的 CWD 不同,产物散到别处 | `_validate_settings({"output_dir": "some_relative_dir"})` 落盘 `'some_relative_dir'` | `target.resolve()` 后再落盘(顺带规范化 `..`) | 落盘值必为绝对路径;回归锁定 |
+| 5.3 | AI 使用方 | `update_settings engine=""`(AI 表达"重置默认"的常见写法)→ `_coerce_setting` 空串透传落盘,`engine=''` 使下次转写选择行为未定义;`--set key=` 同路 | 真实 Service:`_coerce_setting("engine","") == ""` | `set_settings` 统一空串守卫:报错含键名与指引("空串不会重置默认,要改给合法值,不改别传"),与 output_dir 的既有哲学一致 | 真机 `--set engine=` 拒绝;正常值路径不受影响;既有 output_dir 空串测试同步更新 |
+
+排除项(闭环取证后确认无害):`_toml_str` 混合引号/中文路径 tomllib 往返一致;
+`normalize_source` 收带空格 BV 号看似不补全,但 `submit()` 入口已 strip,真实路径安全。
+
 ## 兜底校验清单（发布前逐项打勾）
 
 - [x] stdio：initialize → tools/list（11 工具）→ tools/call 全链路真实管道通过
@@ -89,7 +103,9 @@
 - [x] `--agent-config` 8 种客户端 × stdio/http 渲染正确；`--write` 有 `.bak` 备份；DSH 拒绝直写；JSONC 配置给可行动报错（4.7）；TOML 合并容忍行尾注释（4.4）
 - [x] `--mcp-http` 真机起服（curl healthz 200 + POST ping 有响应 + stdout 打印端点行）—— 含子进程级 e2e 回归（4.1）
 - [x] MCP 通道门禁：设置页关闭时 `--mcp` 与 `--mcp-http` 同样被拦（退出码 3）
-- [x] 全量 pytest 522 通过（第四轮新增回归 4：serve_cli e2e / merge_toml 注释 / JSONC 报错 / DELETE 鉴权）
+- [x] 全量 pytest 525 通过（第五轮新增回归 3:search 大小写 / 空串守卫 / output_dir resolve）
+- [x] `--grep` 真机命中真实转写稿;`--set engine=` 真机拒绝并给可读指引
+- [x] 服务层换面复审(search/set_settings/validate_settings/toml_str/normalize_source)完成,tomllib 往返与 submit strip 链路取证排除
 
 ## 遗留与已知限制（不阻塞发布）
 
