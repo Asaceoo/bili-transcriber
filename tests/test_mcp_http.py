@@ -262,3 +262,52 @@ def test_context_manager():
     with McpHttpServer(port=0) as srv:
         assert srv._httpd is not None
     assert srv._httpd is None
+
+
+def test_serve_cli_subprocess_end_to_end():
+    """回归：serve_cli 曾因缺 import sys 在真实 --mcp-http 路径崩 NameError。
+
+    用子进程真跑 CLI 入口，验证 stdout 端点行 + POST initialize 全通。
+    """
+    import subprocess
+    import sys as _sys
+    import time as _time
+
+    proc = subprocess.Popen(
+        [_sys.executable, "-m", "app.cli", "--mcp-http", "0"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        cwd=str(_sys.path[0]) if _sys.path[0] else ".",
+        text=True, encoding="utf-8")
+    try:
+        # 读到 stdout 端点行（serve_cli 的契约）
+        endpoint = None
+        deadline = _time.time() + 20
+        while _time.time() < deadline:
+            line = proc.stdout.readline()
+            if line.startswith("MCP HTTP listening on "):
+                endpoint = line.strip().split()[-1]
+                break
+            if proc.poll() is not None:
+                break
+        assert endpoint, "serve_cli 未在 stdout 打印端点行（进程可能已崩溃）"
+        assert endpoint.startswith("http://127.0.0.1:")
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            endpoint,
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                             "params": {"protocolVersion": "2024-11-05",
+                                        "capabilities": {},
+                                        "clientInfo": {"name": "t", "version": "0"}}}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Accept": "application/json, text/event-stream"},
+            method="POST")
+        with opener.open(req, timeout=10) as r:
+            body = r.read().decode()
+            assert r.status == 200 and "bili-transcriber" in body
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
