@@ -115,7 +115,7 @@ Input: a link (Bilibili/Douyin/Xiaohongshu/Kuaishou/YouTube) or a local media fi
 
 ```
 bili-transcriber/
-├── app/                        # 29 modules, ~8600 lines
+├── app/                        # 31 modules, ~9700 lines
 │   ├── __init__.py             # APP_VERSION + frozen-mode DLL search path
 │   ├── paths.py                # Runtime path resolution (GUI/CLI/MCP share one data/)
 │   ├── main.py                 # Entry: single instance / port / tray / UI wiring
@@ -155,7 +155,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (27 files / 447 cases)
+├── tests/                      # pytest (28 files / 512 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -569,6 +569,37 @@ Shared policy: always capture the first frame; capture 0.4 s after a cut; minimu
 
 **Table row event gotcha**: after NiceGUI `$emit('open-path', path)`, `e.args` is a list `[path]` and must be unwrapped by `_first_arg(e)`. The explorer call `/select,"path"` needs quotes or paths with spaces get truncated.
 
+### 7.14 `mcp_http.py` — MCP Streamable HTTP transport
+
+For callers that **cannot spawn child processes**: DSH streamable-http connections, containers, in-browser agents. Protocol handling is fully shared with `MCPServer.handle`, so stdio and HTTP expose identical tools and error semantics.
+
+| Capability | Detail |
+|---|---|
+| Routes | `POST /mcp` (JSON or SSE per Accept), `GET /mcp` always 405 (no server-push stream), `DELETE /mcp` 204 ends session, `GET /healthz` liveness |
+| Sessions | created on `initialize` (`Mcp-Session-Id`), 30-min idle TTL, cap 64 (oldest evicted); business state lives in Service/DB so eviction is side-effect-free |
+| Security defaults | binds `127.0.0.1` only; Origin allowlist (non-local 403, anti DNS-rebinding); zero CORS by default; optional Bearer token (`BILI_MCP_HTTP_TOKEN`) |
+| Request guards | missing Content-Length → 400 (no chunked), 8 MB body cap, bad JSON `-32700`, unknown session → 404 asking to re-initialize |
+
+**Two gotchas caught by real tool-closure tests:**
+
+1. **`start()` must spawn its own thread running `serve_forever()`** — the stdlib constructor alone never accepts connections; clients see "requests hang while the server listens".
+2. **`server_bind` calls `socket.getfqdn()` by default** — on machines whose DNS is hijacked by proxies this reverse lookup stalls startup for tens of seconds. `_QuietHTTPServer` overrides it with the literal IP.
+
+Also: the HTTP server is threaded while the Service's SQLite connection is not concurrency-safe → `_handle_lock` serializes tool calls (matching stdio's natural serialization).
+
+### 7.15 `agent_setup.py` — per-client AI onboarding config generator
+
+One MCP server, eight clients, eight config formats — this module freezes the known shapes:
+
+| Client | Format | Delivery |
+|---|---|---|
+| WorkBuddy | JSON `mcpServers` | `--write` to `~/.workbuddy/mcp.json` |
+| DSH | `tables.connections` entry | **direct write refused** (the table is UI-managed); a paste-ready streamable-http / stdio entry is generated instead |
+| Codex | TOML `[mcp_servers.*]` | `--write`; only documented keys (`startup_timeout_sec=300`) — **an invented unknown key breaks the whole config.toml** |
+| Claude / Cursor / VS Code / Tare / generic | JSON | `--write` or manual paste |
+
+Design rule: **generate, never silently mutate user config**. Writes require explicit `--write`, back up to `.bak`, and touch only the `bili-transcriber` entry; `merge_toml` replaces by section boundaries, leaving the user's provider/model config intact. `resolve_executable` distinguishes frozen (`xxx.exe --mcp`) from source (`python -m app.mcp_server`). `doctor()` aggregates local client detection and common pitfalls; paths always go through `app.paths.data_dir()` (hardcoding either flavor's path misreports on the other).
+
 ---
 
 ## 8. Data Contracts
@@ -727,7 +758,7 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **27 files / 447 cases**, green in 3–5 minutes.
+`tests/` holds **28 files / 512 cases**, green in about 2 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|
@@ -736,9 +767,11 @@ python scripts/release.py --single-only # rebuild the single-file build only
 | Network & cookies | `test_netcheck.py` / `test_native_dialog.py` | Temporary SQLite cookie DBs, probes mocked, no network |
 | Engines | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel injection; **concurrent `load()` regression** (`Barrier(2)` asserts a single load) |
 | Orchestration | `test_pipeline.py` | FakeDownloader / FakeTranscriber at the boundary; covers "no re-enqueue for active tasks", leftover recovery, mid-run kill recovery |
-| Service layer | `test_headless.py` | `running` semantics / stalled detection / prewarm / four settings validations / status aliases |
-| CLI | `test_cli.py` | Argument parsing, JSON output, **GBK stdout regression**, non-integer `--set` |
-| MCP | `test_mcp_server.py` | Handshake, nine tools, bad-arg tolerance, **batch flattening**, **NaN sanitizing** |
+| Service layer | `test_headless.py` | `running` semantics / stalled detection / prewarm / four settings validations / status aliases / **search full-text retrieval** |
+| CLI | `test_cli.py` | Argument parsing, JSON output, **GBK stdout regression**, non-integer `--set`, **--grep/--doctor/--agent-config/--mcp-http gating** |
+| MCP | `test_mcp_server.py` | Handshake, **11 tools**, bad-arg tolerance, **batch flattening**, **NaN sanitizing**, timeout clamping |
+| MCP HTTP | `test_mcp_http.py` | Session TTL/eviction, Origin allowlist, Bearer token, ten route states, **real-socket end-to-end** |
+| Onboarding config | `test_agent_setup.py` | 8-client rendering, JSON/TOML merge preserving foreign entries, DSH write refusal, **no invented TOML keys** |
 | Writers | `test_writers.py` | Atomic write retries, no truncated files |
 | UI | `test_ui.py` / `test_main_helpers.py` | NiceGUI `user_plugin`; `_first_arg` / explorer quoting |
 | Release | `test_release_docs.py` | Automatic manual version-header sync |

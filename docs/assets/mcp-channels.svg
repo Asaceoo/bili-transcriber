@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f1220"/><stop offset="1" stop-color="#1a1030"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#fb7299"/><stop offset="1" stop-color="#fc8bab"/>
+    </linearGradient>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8f9bb3"/>
+    </marker>
+  </defs>
+
+  <rect width="900" height="420" rx="18" fill="url(#bg)"/>
+  <text x="450" y="46" text-anchor="middle" fill="#ffffff" font-size="24" font-weight="700">一个服务层，三条通道，接入任意 AI Agent</text>
+  <text x="450" y="72" text-anchor="middle" fill="#8f9bb3" font-size="13">app/headless.py · 同一套工具、同一套错误语义</text>
+
+  <!-- 客户端层 -->
+  <g font-size="13">
+    <g>
+      <rect x="40" y="110" width="150" height="52" rx="10" fill="#232a44" stroke="#3b4468"/>
+      <text x="115" y="132" text-anchor="middle" fill="#ffffff" font-weight="600">WorkBuddy</text>
+      <text x="115" y="150" text-anchor="middle" fill="#8f9bb3" font-size="11">mcp.json · stdio</text>
+    </g>
+    <g>
+      <rect x="40" y="180" width="150" height="52" rx="10" fill="#232a44" stroke="#3b4468"/>
+      <text x="115" y="202" text-anchor="middle" fill="#ffffff" font-weight="600">DSH</text>
+      <text x="115" y="220" text-anchor="middle" fill="#8f9bb3" font-size="11">streamable-http</text>
+    </g>
+    <g>
+      <rect x="40" y="250" width="150" height="52" rx="10" fill="#232a44" stroke="#3b4468"/>
+      <text x="115" y="272" text-anchor="middle" fill="#ffffff" font-weight="600">Codex / Claude</text>
+      <text x="115" y="290" text-anchor="middle" fill="#8f9bb3" font-size="11">config.toml / stdio</text>
+    </g>
+    <g>
+      <rect x="40" y="320" width="150" height="52" rx="10" fill="#232a44" stroke="#3b4468"/>
+      <text x="115" y="342" text-anchor="middle" fill="#ffffff" font-weight="600">脚本 / CI / 其它</text>
+      <text x="115" y="360" text-anchor="middle" fill="#8f9bb3" font-size="11">CLI 参数进 · JSON 出</text>
+    </g>
+  </g>
+
+  <!-- 三条通道 -->
+  <g font-size="13" font-weight="600">
+    <rect x="300" y="110" width="220" height="52" rx="10" fill="#1d3a2f" stroke="#2f7d5c"/>
+    <text x="410" y="132" text-anchor="middle" fill="#7ee2b8">MCP stdio</text>
+    <text x="410" y="150" text-anchor="middle" fill="#8f9bb3" font-size="11">python -m app.mcp_server</text>
+
+    <rect x="300" y="185" width="220" height="52" rx="10" fill="#1d2a44" stroke="#3d5fa8"/>
+    <text x="410" y="207" text-anchor="middle" fill="#8fb8ff">MCP HTTP :8765/mcp</text>
+    <text x="410" y="225" text-anchor="middle" fill="#8f9bb3" font-size="11">--mcp-http · streamable-http</text>
+
+    <rect x="300" y="260" width="220" height="52" rx="10" fill="#3a2f1d" stroke="#a8843d"/>
+    <text x="410" y="282" text-anchor="middle" fill="#ffd58f">CLI</text>
+    <text x="410" y="300" text-anchor="middle" fill="#8f9bb3" font-size="11">bili-transcriber-cli …</text>
+  </g>
+
+  <!-- 服务核心 -->
+  <rect x="620" y="140" width="230" height="170" rx="14" fill="url(#core)"/>
+  <text x="735" y="180" text-anchor="middle" fill="#ffffff" font-size="17" font-weight="700">转写服务</text>
+  <text x="735" y="206" text-anchor="middle" fill="#ffffff" font-size="12">11 个 MCP 工具 · 3 引擎</text>
+  <text x="735" y="228" text-anchor="middle" fill="#ffffff" font-size="12">下载 → 转码 → GPU 转写 → 落盘</text>
+  <text x="735" y="252" text-anchor="middle" fill="#ffffff" font-size="12">search_transcript 全文检索</text>
+  <text x="735" y="274" text-anchor="middle" fill="#ffffff" font-size="12">check_network 网络体检</text>
+  <text x="735" y="296" text-anchor="middle" fill="#ffffff" font-size="12">纯本地 · 数据不出机器</text>
+
+  <!-- 连线 -->
+  <g stroke="#8f9bb3" stroke-width="1.6" fill="none" marker-end="url(#arr)">
+    <path d="M190 136 L298 132"/>
+    <path d="M190 206 L298 208"/>
+    <path d="M190 276 L298 282"/>
+    <path d="M190 346 C 260 346 250 300 298 292"/>
+    <path d="M520 136 L618 180"/>
+    <path d="M520 211 L618 220"/>
+    <path d="M520 286 C 560 286 580 268 618 254"/>
+  </g>
+
+  <!-- 接入提示 -->
+  <text x="410" y="372" text-anchor="middle" fill="#8f9bb3" font-size="12">一键接入：bili-transcriber-cli --agent-config workbuddy|dsh|codex|…（--write 自动写配置）</text>
+  <text x="410" y="392" text-anchor="middle" fill="#6d7a94" font-size="11">自检：--doctor　·　HTTP 只绑 127.0.0.1，支持 Bearer token（BILI_MCP_HTTP_TOKEN）</text>
+</svg>

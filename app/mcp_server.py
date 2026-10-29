@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import Any, TextIO
 
 from app import APP_VERSION
@@ -37,6 +38,8 @@ INSTRUCTIONS = (
     "典型流程:transcribe(提交,可用 wait=true 等完成) -> 若未等待则轮询 wait_jobs "
     "-> get_transcript 取 Markdown/TXT/SRT。首次转写需加载模型(1~2 分钟),"
     "可先调 prewarm_model 预热。任务产物落盘到 output_dir,返回的 paths 为绝对路径。"
+    "查历史内容用 search_transcript 按关键词检索已转写文本;网络/Cookie 排障用 "
+    "check_network(只读检测,不改配置)。"
 )
 
 _ID = {"type": "string", "description": "任务 ID(提交时返回的 media_id)"}
@@ -125,6 +128,37 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "search_transcript",
+        "description": "在已完成任务的转写稿里按关键词全文检索,返回命中任务的 media_id、标题与上下文片段。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "检索关键词(必填)"},
+                "limit": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50,
+                          "description": "最多返回命中任务数"},
+                "context_chars": {"type": "integer", "default": 240, "minimum": 40,
+                                  "maximum": 2000, "description": "每个命中的上下文长度"},
+                "fmt": {"type": "string", "enum": ["md", "txt"], "default": "md",
+                        "description": "检索的文本格式"},
+            },
+            "required": ["keyword"],
+        },
+    },
+    {
+        "name": "check_network",
+        "description": "只读检测本机网络与登录 Cookie(不修改任何配置)。quick=直连探测+代理验证;"
+                       "full=再扫浏览器/cookies.txt 登录态;test=按当前配置逐平台实测。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["quick", "full", "test"],
+                         "default": "quick"},
+                "timeout": {"type": "number", "default": 4.0, "minimum": 1.0,
+                            "maximum": 15.0, "description": "单次探测超时秒数"},
+            },
+        },
+    },
+    {
         "name": "cancel_job",
         "description": "取消排队中/进行中的任务。",
         "inputSchema": {"type": "object", "properties": {"media_id": _ID},
@@ -198,6 +232,24 @@ def _pick(args: dict, key: str, default: Any) -> Any:
     return default if raw is None or raw == "" else raw
 
 
+def _dataclass_public(obj: Any) -> dict:
+    """dataclass → JSON 友好 dict:补上 property(readable/coverage 等派生字段)、
+    Path 转字符串。AI 使用方只看 JSON,拿不到 Python 属性,漏了就是信息缺失。"""
+    out = {}
+    for key, value in vars(obj).items():
+        out[key] = str(value) if isinstance(value, Path) else value
+    for name in dir(type(obj)):
+        if name.startswith("_"):
+            continue
+        attr = getattr(type(obj), name)
+        if isinstance(attr, property) and name not in out:
+            try:
+                out[name] = getattr(obj, name)
+            except Exception:  # noqa: BLE001 — 派生字段失败不挡主体
+                pass
+    return out
+
+
 def _arg_int(args: dict, key: str, default: int,
              minimum: int | None = None, maximum: int | None = None) -> int:
     """取整型参数并夹紧范围;类型错误给出可读提示(AI 客户端常传字符串)。"""
@@ -213,13 +265,17 @@ def _arg_int(args: dict, key: str, default: int,
     return value
 
 
-def _arg_num(args: dict, key: str, default: float, minimum: float = 0.0) -> float:
+def _arg_num(args: dict, key: str, default: float, minimum: float = 0.0,
+             maximum: float | None = None) -> float:
     raw = _pick(args, key, default)
     try:
         value = float(raw)
     except (TypeError, ValueError) as exc:
         raise ServiceError(f"参数 {key} 需要数字,收到:{raw!r}") from exc
-    return max(minimum, value)
+    value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 class MCPServer:
@@ -325,7 +381,8 @@ class MCPServer:
 
     def _tool_transcribe(self, args: dict) -> dict:
         wait = bool(args.get("wait", False))
-        timeout = _arg_num(args, "timeout_sec", 600.0, minimum=1.0)
+        # 上限一天:AI 会把超时传成 1e9 这类"数学上对、实际上挂死"的值
+        timeout = _arg_num(args, "timeout_sec", 600.0, minimum=1.0, maximum=86400.0)
         result = self.service.submit(
             _arg_str(args, "source"),
             output_dir=args.get("output_dir"),
@@ -347,7 +404,8 @@ class MCPServer:
             ids = [ids]
         if not isinstance(ids, (list, tuple)):
             raise ServiceError("media_ids 必须是字符串数组")
-        return self.service.wait(ids, _arg_num(args, "timeout_sec", 600.0, minimum=1.0))
+        return self.service.wait(ids, _arg_num(args, "timeout_sec", 600.0,
+                                               minimum=1.0, maximum=86400.0))
 
     def _tool_job_status(self, args: dict) -> dict:
         return self.service.status(_arg_str(args, "media_id"))
@@ -378,6 +436,76 @@ class MCPServer:
 
     def _tool_update_settings(self, args: dict) -> dict:
         return self.service.set_settings(**args)
+
+    def _tool_search_transcript(self, args: dict) -> dict:
+        return self.service.search(
+            str(args.get("keyword", "") or ""),
+            limit=_arg_int(args, "limit", 10, minimum=1, maximum=50),
+            context_chars=_arg_int(args, "context_chars", 240, minimum=40, maximum=2000),
+            fmt=str(args.get("fmt", "md") or "md"),
+        )
+
+    def _tool_check_network(self, args: dict) -> dict:
+        # 延迟导入:netcheck 会拉起探测线程,不用的场景(纯转写)不该付这份成本
+        from app import netcheck
+
+        mode = str(args.get("mode", "quick") or "quick").lower()
+        if mode not in ("quick", "full", "test"):
+            raise ServiceError(
+                f"mode 只支持 quick/full/test,收到:{args.get('mode')!r}")
+        timeout = _arg_num(args, "timeout", 4.0, minimum=1.0)
+        if timeout > 15.0:
+            timeout = 15.0
+
+        if mode == "test":
+            report = netcheck.test_configuration(timeout=timeout)
+            return {
+                "mode": mode,
+                "ok": report.ok,
+                "summary": report.summary,
+                "source": report.source,
+                "warnings": report.warnings,
+                "platforms": [vars(item) for item in report.items],
+            }
+
+        network = netcheck.probe_network(timeout=timeout)
+        payload: dict[str, Any] = {
+            "mode": mode,
+            "direct": {k: vars(v) for k, v in network.direct.items()},
+            "system_proxy": network.system_proxy,
+            "working_proxy": network.working_proxy,
+            "proxies": [vars(p) for p in network.proxies],
+        }
+        if mode == "full":
+            from app.paths import base_dir, data_dir
+
+            browsers = netcheck.detect_browsers()
+            settings = self.service.get_settings()
+            dirs = netcheck.default_cookie_dirs(base_dir(), data_dir())
+            extra: list[str] = []
+            cur = str(settings.get("cookie_file", "") or "").strip()
+            if cur:
+                extra.append(cur)  # 用户手填的路径即使不在常见目录也要查
+            cookie_files = netcheck.detect_cookie_files(dirs, extra_files=extra)
+            report = netcheck.build_report(
+                browsers, cookie_files, network,
+                current_browser=str(settings.get("cookies_from_browser", "") or ""),
+                current_cookie_file=cur,
+                current_proxy=str(settings.get("proxy", "") or ""),
+            )
+            payload.update({
+                "browsers": [_dataclass_public(b) for b in report.browsers],
+                "cookie_files": [_dataclass_public(f) for f in report.cookie_files],
+                "suggested": {
+                    "browser": report.suggested_browser,
+                    "cookie_file": report.suggested_cookie_file,
+                    "proxy": report.suggested_proxy,
+                },
+                "platform_states": {
+                    k: vars(v) for k, v in report.platform_states.items()},
+                "notes": report.notes,
+            })
+        return payload
 
     def close(self) -> None:
         if self._service is not None:

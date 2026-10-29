@@ -6,8 +6,13 @@
   bili-transcriber-cli --list --json
   bili-transcriber-cli --status BV1xx_p1 --json
   bili-transcriber-cli --result BV1xx_p1 --format md --max-chars 0
+  bili-transcriber-cli --grep 关键词 --limit 5
   bili-transcriber-cli --set engine=whisper --set model_size=large-v3-turbo
-  bili-transcriber-cli --mcp        # 以 MCP stdio 服务运行
+  bili-transcriber-cli --doctor                    # AI 接入自检
+  bili-transcriber-cli --agent-config workbuddy    # 打印 WorkBuddy 接入配置
+  bili-transcriber-cli --agent-config codex --transport http --write
+  bili-transcriber-cli --mcp                       # 以 MCP stdio 服务运行
+  bili-transcriber-cli --mcp-http 8765             # 以 MCP HTTP 服务运行
 
 退出码:0 成功;1 任务失败/执行错误;2 参数错误;3 通道已在设置页关闭。
 """
@@ -55,7 +60,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--status", metavar="MEDIA_ID", help="查询单个任务")
     p.add_argument("--list", action="store_true", help="列出任务")
-    p.add_argument("--limit", type=int, default=20, help="--list 返回条数(默认 20)")
+    p.add_argument("--limit", type=int, default=20,
+                   help="--list/--grep 返回条数(默认 20)")
     p.add_argument("--status-filter", default="", help="--list 按状态过滤")
     p.add_argument("--search", default="", help="--list 关键字过滤")
     p.add_argument("--result", metavar="MEDIA_ID", help="读取任务产物文本")
@@ -67,7 +73,25 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="修改并持久化设置,可重复")
     p.add_argument("--cancel", metavar="MEDIA_ID", help="取消任务")
     p.add_argument("--prewarm", action="store_true", help="后台预加载模型")
+    p.add_argument("--grep", metavar="KEYWORD",
+                   help="在已完成任务的转写稿里全文检索(条数用 --limit)")
+    p.add_argument("--context", type=int, default=240, help="--grep 上下文字符数(默认 240)")
     p.add_argument("--mcp", action="store_true", help="以 MCP stdio 服务运行")
+    p.add_argument("--mcp-http", nargs="?", const=0, default=None, metavar="PORT",
+                   help="以 MCP HTTP(streamable-http)服务运行;省略端口则自动选")
+    p.add_argument("--doctor", action="store_true",
+                   help="AI 接入自检:探测本机客户端/配置路径/常见错误")
+    p.add_argument("--agent-config", metavar="CLIENT",
+                   help="打印某个 AI 客户端的接入配置(workbuddy/dsh/codex/claude/"
+                        "cursor/vscode/tare/generic),配 --transport http 生成 HTTP 版")
+    p.add_argument("--agent-list", action="store_true",
+                   help="列出本机检测到的 AI 客户端与注册状态")
+    p.add_argument("--transport", choices=["stdio", "http"], default="stdio",
+                   help="--agent-config 的传输方式(默认 stdio)")
+    p.add_argument("--mcp-port", type=int, default=8765,
+                   help="--agent-config --transport http 用的端口(默认 8765)")
+    p.add_argument("--write", action="store_true",
+                   help="--agent-config 时把配置写进客户端文件(先备份 .bak)")
     return p
 
 
@@ -171,6 +195,69 @@ def _parse_sets(pairs: list[str]) -> dict[str, Any]:
     return out
 
 
+def _run_agent_setup(args: Any) -> int:
+    """AI 接入三件套:--doctor 自检 / --agent-list 列客户端 / --agent-config 出配置。
+
+    都不碰 Service(不开数据库),写配置必须显式 --write。
+    """
+    from app import agent_setup
+
+    if args.agent_config:
+        try:
+            spec = agent_setup.resolve_client(args.agent_config)
+        except KeyError as exc:
+            _emit({"ok": False, "error": str(exc)}, args.json, f"错误:{exc}")
+            return 2
+        try:
+            snippet = agent_setup.render(spec, transport=args.transport,
+                                         port=args.mcp_port)
+        except ValueError as exc:
+            _emit({"ok": False, "error": str(exc)}, args.json, f"错误:{exc}")
+            return 2
+        if not args.write:
+            if args.json:
+                _emit({"ok": True, "client": spec.key, "label": spec.label,
+                       "transport": args.transport, "config": snippet}, True)
+            else:
+                _write(snippet)
+                # 说明走 stderr:stdout 保持"复制即用"的纯净配置
+                if sys.stderr is not None and spec.note:
+                    print(f"# 客户端:{spec.label}\n# {spec.note}", file=sys.stderr)
+            return 0
+        try:
+            result = agent_setup.write_config(spec, snippet)
+        except (ValueError, OSError, json.JSONDecodeError) as exc:
+            _emit({"ok": False, "error": f"写入失败:{exc}"}, args.json,
+                  f"错误:写入失败:{exc}")
+            return 1
+        _emit(result, args.json,
+              f"已写入 {result['path']}"
+              + (f"(备份:{result['backup']})" if result["backup"] else "(新建)"))
+        return 0
+
+    if args.agent_list:
+        rows = agent_setup.detect_clients()
+        _emit({"clients": rows}, args.json, "\n".join(agent_setup.summary(r) for r in rows))
+        return 0
+
+    # --doctor
+    report = agent_setup.doctor()
+    lines = [
+        f"版本 {report['version']} | python: {report['python']}",
+        f"stdio 命令: {report['stdio']['command']} {' '.join(report['stdio']['args'])}",
+        f"http 端点: {report['http']['url']}",
+        "本机客户端:",
+    ]
+    lines += [f"  {agent_setup.summary(c)}" for c in report["clients"]]
+    if report["issues"]:
+        lines.append("发现问题:")
+        lines += [f"  - {i}" for i in report["issues"]]
+    else:
+        lines.append("未发现阻塞性问题")
+    _emit(report, args.json, "\n".join(lines))
+    return 0
+
+
 def _job_line(job: dict) -> str:
     name = job.get("title") or job.get("media_id")
     line = f"[{job.get('status')}] {name} ({job.get('media_id')})"
@@ -193,6 +280,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.mcp:
         from app.mcp_server import main as mcp_main
         return mcp_main()
+    if args.mcp_http is not None:
+        # 与 stdio 同一把门禁:设置页关掉 MCP 就两条通道一起关
+        blocked = channel_block_reason("mcp")
+        if blocked:
+            _emit({"ok": False, "error": blocked, "channel": "mcp", "enabled": False},
+                  args.json, f"错误:{blocked}")
+            return EXIT_CHANNEL_DISABLED
+        from app.mcp_http import serve_cli
+        return serve_cli(port=args.mcp_http or None)
+    if args.doctor or args.agent_list or args.agent_config:
+        return _run_agent_setup(args)
     # 通道门禁:放在构造 Service 之前 —— 关闭时不该去开数据库/建 pipeline
     blocked = channel_block_reason("cli")
     if blocked:
@@ -240,6 +338,18 @@ def main(argv: list[str] | None = None) -> int:
             payload = service.transcript(args.result, fmt=args.format,
                                          max_chars=args.max_chars)
             _write(_dump_json(payload) if args.json else payload["content"])
+            return 0
+        if args.grep:
+            payload = service.search(args.grep, limit=args.limit,
+                                     context_chars=args.context)
+            if args.json:
+                _write(_dump_json(payload))
+            else:
+                if not payload["hits"]:
+                    _write(f"未命中:{args.grep}")
+                for hit in payload["hits"]:
+                    _write(f"[{hit['media_id']}] {hit['title']}"
+                           f"\n  {hit['snippet']}\n  → {hit['path']}")
             return 0
         if not args.source:
             if sys.stderr is not None:

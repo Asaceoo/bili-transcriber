@@ -9,8 +9,8 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
-[![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-447%20passed-2ea44f)](tests)
+[![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-000000)](#ai-集成cli--mcp)
+[![Tests](https://img.shields.io/badge/tests-512%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
 </div>
@@ -29,8 +29,8 @@
 | [快速开始](#快速开始) | 三分钟跑通第一个任务 |
 | [使用说明](#使用说明) | 三个页签逐页讲清 |
 | [20 个使用实例](#20-个使用实例) | 直接抄走的真实场景 |
-| [命令行参考](#命令行参考) | 26 个参数全表 |
-| [AI 集成（CLI / MCP）](#ai-集成cli--mcp) | 让 WorkBuddy 等直接调用 |
+| [命令行参考](#命令行参考) | 33 个参数全表 |
+| [AI 集成（CLI / MCP）](#ai-集成cli--mcp) | 三条通道接入 WorkBuddy/DSH/Codex 等 |
 | [输出结构](#输出结构) | 产物长什么样 |
 | [常见问题](#常见问题) | 10 个高频坑 |
 | [数据与隐私](#数据与隐私) | 什么会联网、什么不会 |
@@ -85,7 +85,7 @@
 - **独立程序窗口** — 双击直接开原生窗口（WebView2），不再被丢进浏览器；没装 WebView2 才自动退回浏览器。
 - **系统托盘** — 托盘图标可唤回窗口或退出。
 - **单实例保护** — 重复启动只会把已有窗口提到前台，不会抢同一个任务、也不会闪退。
-- **CLI + MCP 双通道** — 命令行与 AI 软件都能调；两个通道各有开关，设置页一键关闭。
+- **CLI + MCP 三通道** — 命令行、MCP stdio、MCP HTTP（streamable-http）三种方式调用；CLI/CLI、MCP/MCP 两个开关，设置页一键关闭。`--agent-config` 一条命令生成 8 种 AI 客户端的接入配置。
 - **网络与 Cookie 一键检测** — 自动扫出浏览器登录态、cookies.txt 和本机代理并填好设置，点「测试连接」当场验证能不能用。
 - **纯本地** — 转写过程不调用任何外部 AI API。
 
@@ -238,6 +238,8 @@ bili-transcriber-cli "https://www.bilibili.com/video/BV1xx411c7mD" --json
 bili-transcriber-cli --result BV1xx411c7mD_p1 --format txt
 ```
 
+只提交不等结果用 `--no-wait`：任务留在队列，**下次启动桌面端会自动续跑**，不会变僵尸任务。
+
 **6. 提取某段话的位置（做笔记要贴时间点）**
 
 打开 `.md` 产物，每段前面就是 `[hh:mm:ss]` 时间戳，复制即可。需要精确到秒时用 `.srt`。
@@ -298,33 +300,33 @@ Get-ChildItem D:\录音\*.m4a | ForEach-Object {
 
 ### AI 集成三例
 
-**16. 让 AI 助手直接转写（MCP）**
+**16. 让 WorkBuddy 直接转写（一条命令接入）**
 
-```jsonc
-// 客户端配置
-{"mcpServers": {"bili-transcriber": {
-  "command": "C:\\Program Files\\Bili Note\\bili-transcriber.exe",
-  "args": ["--mcp"]}}}
+```text
+bili-transcriber-cli --agent-config workbuddy --write
+# 写进 ~/.workbuddy/mcp.json(已有配置原样保留,写前自动备份)
 ```
 
-然后在对话里说「把这个链接转成文字稿」，AI 自己调 `transcribe` → `wait_jobs` → `get_transcript`。
+重启 WorkBuddy 后在对话里说「把这个链接转成文字稿」，
+AI 自己调 `transcribe` → `wait_jobs` → `get_transcript`。
 
-**17. 脚本里等任务跑完再取结果**
+**17. 不能拉子进程的客户端走 MCP HTTP（DSH 等）**
 
-```powershell
-bili-transcriber-cli "https://www.bilibili.com/video/BV1xx411c7mD" --json --timeout 1800
-# 退出码 0 = 全部成功；返回体里含 state / jobs / outputs
+```text
+bili-transcriber-cli --mcp-http            # 从 8765 起自动找空位,stdout 打印实际端点
+bili-transcriber-cli --agent-config dsh --transport http   # 粘贴进 DSH「添加 MCP 连接」
 ```
 
-**18. 只提交不等待，回头再收**
+同一个服务，stdio 与 HTTP 两条通道工具完全一致；HTTP 只绑本机回环。
 
-```powershell
-bili-transcriber-cli "https://..." --no-wait      # 提交即返回
-bili-transcriber-cli --list --status-filter done  # 稍后查
-bili-transcriber-cli --result BV1xx411c7mD_p1 --format srt
+**18. AI 帮你找回“上次讲过 X 的那个视频”**
+
+```text
+bili-transcriber-cli --grep 注意力机制 --limit 5
+# 或在 MCP 对话里让 AI 调 search_transcript 工具
 ```
 
-> `--no-wait` 提交的任务留在队列里；**下次启动桌面端会自动续跑**，不会变成僵尸任务。
+返回命中的任务、标题、上下文片段与产物路径 —— 转写稿多了以后不用一个个翻。
 
 ---
 
@@ -352,6 +354,7 @@ $env:BILI_PORT = "9000"
 ```
 bili-transcriber.exe --cli <同样参数>
 bili-transcriber.exe --mcp          # MCP stdio 服务
+bili-transcriber.exe --mcp-http     # MCP HTTP 服务(streamable-http)
 bili-transcriber.exe --version
 ```
 
@@ -378,9 +381,11 @@ bili-transcriber.exe --version
 | 参数 | 说明 |
 |---|---|
 | `--list` | 列出任务 |
-| `--limit` | 返回条数，默认 20 |
+| `--limit` | 返回条数，默认 20（`--list` / `--grep` 共用） |
 | `--status-filter` | 按状态过滤；支持 `running` 别名（queued/downloading/transcribing…） |
 | `--search` | 关键字过滤标题 |
+| `--grep KEYWORD` | 在已完成任务的**转写稿正文**里全文检索，返回命中任务与上下文片段 |
+| `--context` | `--grep` 的上下文字符数，默认 240 |
 | `--status MEDIA_ID` | 查单个任务 |
 | `--result MEDIA_ID` | 读取产物文本 |
 | `--format` | `md` / `txt` / `srt` / `notes` |
@@ -395,6 +400,13 @@ bili-transcriber.exe --version
 | `--set KEY=VALUE` | 改设置，可重复；非法值直接拒绝 |
 | `--prewarm` | 预加载模型并**等到就绪**才退出（退出码反映是否加载成功） |
 | `--mcp` | 以 MCP stdio 服务运行 |
+| `--mcp-http [PORT]` | 以 MCP HTTP 服务运行（streamable-http）；省略端口从 8765 起自动找空位 |
+| `--doctor` | AI 接入自检：本机客户端、配置路径、常见错误一次说清 |
+| `--agent-config CLIENT` | 打印某客户端的接入配置（`workbuddy`/`dsh`/`codex`/`claude`/`cursor`/`vscode`/`tare`/`generic`） |
+| `--agent-list` | 列出本机检测到的 AI 客户端与注册状态 |
+| `--transport` | `--agent-config` 的传输方式：`stdio`（默认）/ `http` |
+| `--mcp-port` | `--transport http` 用的端口，默认 8765 |
+| `--write` | `--agent-config` 时把配置写进客户端文件（先备份 `.bak`；DSH 由界面托管，拒绝直写） |
 | `--version` | 显示版本 |
 
 > 输出编码：**被管道/重定向接管时一律 UTF-8**（AI 客户端按 UTF-8 解析不会乱码），留在终端里则沿用控制台代码页，避免 `cmd.exe` 花屏。JSON 里的中文原样输出，不做 ASCII 转义。
@@ -405,12 +417,37 @@ bili-transcriber.exe --version
 
 <img src="docs/assets/ai-integration.svg" alt="AI 集成：CLI 与 MCP 两条通道共用同一套服务层" width="100%" />
 
-两条通道共用同一个服务层（`app/headless.py`），行为完全一致 —— 只是传输方式不同：
+<img src="docs/assets/mcp-channels.svg" alt="一个服务层，三条通道接入任意 AI Agent" width="100%" />
+
+三条通道共用同一个服务层（`app/headless.py`），行为完全一致 —— 只是传输方式不同：
 
 - **CLI** — 脚本、批处理、CI 里调用，参数进 / JSON 出。
-- **MCP** — AI 客户端（WorkBuddy、DeepSeek-Honey、Claude Code 等）通过 stdio 直接调工具。
+- **MCP stdio** — 能自己拉起子进程的 AI 客户端（WorkBuddy、Codex、Claude Code 等）。
+- **MCP HTTP** — 拉不了子进程的调用方：DSH 的 streamable-http 连接、容器、浏览器内 Agent。
+  `--mcp-http` 启动，只绑 `127.0.0.1`，校验 Origin 防跨站，可选 Bearer token。
 
-### MCP 的 9 个工具
+### 一条命令接入（--agent-config）
+
+```powershell
+bili-transcriber-cli --doctor                        # 先自检:装了哪些客户端、缺什么
+bili-transcriber-cli --agent-config workbuddy        # 打印 WorkBuddy 的 mcpServers 片段
+bili-transcriber-cli --agent-config workbuddy --write    # 直接写进 ~/.workbuddy/mcp.json(先备份)
+bili-transcriber-cli --agent-config codex --transport http --write   # Codex 走 HTTP
+```
+
+| 客户端 | 配置位置 | 写入 | 说明 |
+|---|---|---|---|
+| WorkBuddy | `~/.workbuddy/mcp.json` | ✅ | stdio；设置页也能复制同一份片段 |
+| DSH | 界面「添加 MCP 连接」 | ❌ 手动粘贴 | 生成 streamable-http 或 stdio 连接条目；连接表由界面托管 |
+| Codex | `~/.codex/config.toml` | ✅ | TOML `[mcp_servers.*]`，含 `startup_timeout_sec` |
+| Claude Code / Desktop | `~/.claude.json` | ✅ | stdio |
+| Cursor | `~/.cursor/mcp.json` | ✅ | stdio |
+| VS Code (Copilot) | `.vscode/mcp.json` | ✅ | 用 `servers` 键；仅 stdio |
+| Tare / 其它 | 按软件说明 | 手动粘贴 | 通用 `mcpServers` 片段 |
+
+> 写入只动 `bili-transcriber` 这一个条目，你已有的其它 MCP 服务原样保留；写前自动备份 `.bak`。
+
+### MCP 的 11 个工具
 
 | 工具 | 作用 |
 |---|---|
@@ -419,10 +456,12 @@ bili-transcriber.exe --version
 | `job_status` | 查单个任务状态 |
 | `list_jobs` | 列出任务（支持 `running` 别名与关键字） |
 | `get_transcript` | 取产物文本（可指定格式与截断长度） |
+| `search_transcript` | 在已完成任务的转写稿里**全文检索**，返回命中任务与上下文 |
+| `check_network` | 只读检测本机网络与登录 Cookie（`quick`/`full`/`test` 三档，不改配置） |
 | `cancel_job` | 取消任务 |
 | `prewarm_model` | 预加载模型（`wait=true` 时阻塞到就绪） |
 | `get_settings` | 读当前设置 |
-| `update_settings` | 改设置（白名单校验 + 输出目录写探针） |
+| `update_settings` | 改设置（白名单校验 + 类型强转，坏值不落盘） |
 
 细节见 [`docs/ai-integration.md`](docs/ai-integration.md)。
 
@@ -433,7 +472,7 @@ bili-transcriber.exe --version
 | 开关 | 关掉之后 |
 |---|---|
 | 允许命令行（CLI）调用 | `--cli` / `bili-transcriber-cli` 直接返回 `{"ok": false, "error": "…已在桌面端「设置」中关闭"}`,退出码 **3** |
-| 允许 MCP 调用 | `--mcp` 不进入协议循环，原因写 stderr，退出码 **1**（stdout 保持干净） |
+| 允许 MCP 调用 | `--mcp` 与 `--mcp-http` 都不启动，原因写 stderr（`--mcp` 退出码 1，stdout 保持干净） |
 
 - **只影响新进程**：已经连上的 MCP 客户端需要重连才生效；桌面端本身始终可用。
 - **只能从桌面端改**：`update_settings` / `--set` 都不接受这两个键 —— 被提示注入的 AI 没法给自己开门。
@@ -497,6 +536,9 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 **Q11 微信视频号链接能转吗？**
 不能直链解析。程序会主动拦截并提示改用「本地上传」——先自己把视频存下来，再选文件转写。
 
+**Q12 Python 脚本连 `--mcp-http` 一直超时？**
+大概率是系统代理把 `127.0.0.1` 的请求也代理出去了（Clash 等常见）。Python `urllib` 用 `ProxyHandler({})` 禁代理，或给进程设 `no_proxy=127.0.0.1,localhost`；curl 加 `--noproxy "*"`。Node / Go 客户端默认不受影响。
+
 ---
 
 ## 数据与隐私
@@ -525,11 +567,11 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 447 passed
+.venv\Scripts\pytest -q                    # 当前 512 passed
 .venv\Scripts\python -m app.main           # 开发运行
 ```
 
-测试分成三档：单元（store / writers / downloader）、编排（pipeline，注入 Fake 边界）、UI（NiceGUI `user_plugin`）。另有打包冒烟脚本在 `build/smoke_*.py`。
+测试分成三档：单元（store / writers / downloader）、编排（pipeline，注入 Fake 边界）、UI（NiceGUI `user_plugin`）。另有打包冒烟脚本在 `build/smoke_*.py`。AI 接入层的对抗性审查记录见 [`docs/adversarial-review.md`](docs/adversarial-review.md)。
 
 ### 打包发布
 

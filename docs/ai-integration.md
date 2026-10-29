@@ -108,55 +108,66 @@ bili-transcriber-cli --cancel BV1xx411c7mD_p1
 
 ### 2.1 传输与协议
 
-- 传输:stdio,换行分隔 JSON-RPC 2.0(标准 MCP stdio)。
+- 传输:两条通道,协议处理完全复用同一份 `MCPServer.handle`。
+  - **stdio**:换行分隔 JSON-RPC 2.0(标准 MCP stdio);`python -m app.mcp_server` 或 `xxx.exe --mcp`。
+  - **HTTP(streamable-http)**:`bili-transcriber-cli --mcp-http [PORT]`(省略端口从 8765 起自动找空位),
+    端点 `POST /mcp`,`GET /healthz` 探活。给拉不起子进程的调用方用(DSH 的 streamable-http 连接、容器、浏览器内 Agent)。
+- HTTP 安全默认值:只绑 `127.0.0.1`;校验 `Origin`(非本机来源 403,专防 DNS rebinding);
+  默认不发 CORS 头;可选 Bearer token(环境变量 `BILI_MCP_HTTP_TOKEN`,开启后无 token 401)。
+  **Python `urllib` 调用方注意**:系统代理会把 127.0.0.1 也代理出去,需 `ProxyHandler({})` 或 `no_proxy`。
 - 协议版本:支持 `2025-06-18` / `2025-03-26` / `2024-11-05`(自动协商)。
 - 能力:仅 `tools`(无 resources/prompts)。对客户端的 `resources/list` / `prompts/list` 请求回**空清单**而非 `-32601`,避免个别客户端把服务标成不可用。
-- 所有日志写 stderr 与 `%LOCALAPPDATA%\Bili Note\logs\app.log`,stdout 只输出协议数据。**协议实现层做了 stdout 隔离**:`sys.stdout` 被改指向 stderr,协议句柄单独持有,任何遗留 `print` / 第三方库输出都不会插进 JSON 帧。
-- 通道开关:桌面端「设置 → AI 调用与命令行」可关闭 MCP。关闭时进程不进入协议循环,退出码 1,原因写 stderr,stdout 保持干净。
+- 所有日志写 stderr 与 `%LOCALAPPDATA%\Bili Note\logs\app.log`,stdio 通道的 stdout 只输出协议数据。**协议实现层做了 stdout 隔离**:`sys.stdout` 被改指向 stderr,协议句柄单独持有,任何遗留 `print` / 第三方库输出都不会插进 JSON 帧。HTTP 通道的 stdout 打一行 `MCP HTTP listening on …`(自动选端口时靠它拿实际端点)。
+- 通道开关:桌面端「设置 → AI 调用与命令行」可关闭 MCP。关闭时 stdio 与 HTTP 都不启动。
 
-### 2.2 客户端配置
+### 2.2 客户端配置(--agent-config 一条命令)
 
-**WorkBuddy**(`~/.workbuddy/mcp.json`):
+```powershell
+bili-transcriber-cli --doctor                              # 自检:装了哪些客户端、缺什么
+bili-transcriber-cli --agent-config workbuddy --write      # 写入 ~/.workbuddy/mcp.json(先备份 .bak)
+bili-transcriber-cli --agent-list                          # 列出客户端与注册状态
+```
+
+| 客户端 | 配置位置 | `--write` | 传输 |
+|---|---|---|---|
+| WorkBuddy | `~/.workbuddy/mcp.json` | ✅ | stdio(默认)/ http |
+| DSH | 界面「添加 MCP 连接」 | ❌ 手动粘贴(连接表由界面托管) | streamable-http / stdio |
+| Codex | `~/.codex/config.toml` | ✅ | TOML `[mcp_servers.*]` + `startup_timeout_sec=300` |
+| Claude Code/Desktop | `~/.claude.json` | ✅ | stdio |
+| Cursor | `~/.cursor/mcp.json` | ✅ | stdio |
+| VS Code | `.vscode/mcp.json` | ✅ | `servers` 键,stdio |
+| Tare / 其它 | 按软件说明 | 手动粘贴 | 通用 `mcpServers` 片段 |
+
+写入只动 `bili-transcriber` 条目,用户的其它 MCP 服务原样保留;写前自动备份。
+DSH 的 `mcp_connector.json` 是它自己的 `tables` 结构,**拒绝直写**(写坏会让 DSH 起不来)。
+
+手动配置 WorkBuddy(`~/.workbuddy/mcp.json`)等价于:
 
 ```json
 {
   "mcpServers": {
     "bili-transcriber": {
       "command": "D:\\bilibili\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "app.mcp_server"],
-      "cwd": "D:\\bilibili"
+      "args": ["-m", "app.mcp_server"]
     }
   }
 }
 ```
 
-使用桌面安装版 exe(无需 Python):
-
-```json
-{
-  "mcpServers": {
-    "bili-transcriber": {
-      "command": "C:\\Program Files\\Bili Note\\bili-transcriber.exe",
-      "args": ["--mcp"]
-    }
-  }
-}
-```
-
-**DeepSeek-Honey / 其他 MCP 客户端**:凡是支持 stdio MCP 的客户端,配置项等价于
-`command + args`(如上);不支持 stdio 的客户端需要其自带 stdio 桥接。
-
+打包版 exe(无需 Python):`"command": "C:\\Program Files\\Bili Note\\bili-transcriber.exe", "args": ["--mcp"]`。
 写入配置后,需要在 WorkBuddy 的连接器管理页对新建的 MCP 服务点「信任」才会加载。
 
 ### 2.3 工具清单
 
 | 工具 | 作用 | 关键参数 |
 |------|------|----------|
-| `transcribe` | 提交链接/本地文件 | `source`(必填)、`wait`、`timeout_sec`、`output_dir`、`engine`、`model_size`、`language`、`notes` |
-| `wait_jobs` | 等待任务到终态 | `media_ids`(数组)、`timeout_sec` |
+| `transcribe` | 提交链接/本地文件 | `source`(必填)、`wait`、`timeout_sec`(1~86400 夹紧)、`output_dir`、`engine`、`model_size`、`language`、`notes` |
+| `wait_jobs` | 等待任务到终态 | `media_ids`(数组或单个字符串)、`timeout_sec` |
 | `job_status` | 单任务状态/进度/产物路径 | `media_id` |
 | `list_jobs` | 列历史,可按状态/关键字筛选 | `status`、`search`、`limit` |
 | `get_transcript` | 读产物正文(默认截断 12000 字) | `media_id`、`format`、`max_chars` |
+| `search_transcript` | **全文检索**已完成任务的转写稿,返回命中任务+上下文片段 | `keyword`(必填)、`limit`、`context_chars`、`fmt`(md/txt) |
+| `check_network` | **只读**网络/Cookie 体检,不改配置 | `mode`(quick=直连+代理 / full=加浏览器与 cookies.txt 扫描 / test=按当前配置逐平台实测)、`timeout` |
 | `cancel_job` | 取消任务 | `media_id` |
 | `prewarm_model` | 后台预加载模型 | — |
 | `get_settings` | 读当前设置 | — |
@@ -164,6 +175,8 @@ bili-transcriber-cli --cancel BV1xx411c7mD_p1
 
 工具返回统一包含 `content[0].text`(JSON 字符串)与 `structuredContent`(同结构对象);
 业务错误通过 `isError: true` + `{"ok": false, "error": "..."}` 返回,不会中断服务。
+`check_network` 的 full 模式会附上 `browsers`(含 `readable`/`coverage` 等派生字段)、
+`cookie_files`、`platform_states` 与 `suggested`(检测模块建议填的 browser/cookie_file/proxy)。
 
 ### 2.4 典型调用序列
 
@@ -216,6 +229,11 @@ get_transcript(media_id)
 | 中文乱码 | 客户端需按 UTF-8 解析 stdio;服务端已强制 UTF-8 输出 |
 | CLI 的 JSON 读出来是乱码(仅 MCP 正常) | 0.1.39 及更早的 CLI 在中文 Windows 下按 GBK 写 stdout。0.1.40 起被管道接管时强制 UTF-8;升级后重试,或临时设 `PYTHONUTF8=1` 再调 |
 | 启动即退出,stderr 说「通道已在桌面端「设置」中关闭」 | 设置页关掉了 MCP 开关,勾回来保存即可(或把 `settings.json` 的 `enable_mcp` 改 `true`) |
+| HTTP 请求一直超时(客户端是 Python) | 系统代理把 127.0.0.1 也代理走了。`urllib.request.build_opener(urllib.request.ProxyHandler({}))` 或设 `no_proxy=127.0.0.1,localhost` |
+| HTTP 返回 401 | 服务开了 Bearer token(`BILI_MCP_HTTP_TOKEN`),请求头补 `Authorization: Bearer <token>` |
+| HTTP 返回 403「拒绝跨站请求」 | 请求带了非本机 Origin。浏览器页面无法直接调用;原生客户端不带 Origin 即可 |
+| HTTP 返回 404「会话不存在」 | 会话被回收(闲置 30 分钟)或服务重启过,重新 `initialize` |
+| 端口 8765 被占 | `--mcp-http` 省略端口会自动向后找 20 个;指定端口时换一个即可 |
 | 日志里出现 `database is locked` | 0.1.39 及更早:桌面端与 MCP 同时写 `history.db` 撞锁。0.1.40 起 `busy_timeout=5000`,升级即可 |
 | 客户端把整段会话断开 | 旧版遇到非 UTF-8 字节会崩;0.1.40 起降级为 `-32700` 解析错误并继续 |
 

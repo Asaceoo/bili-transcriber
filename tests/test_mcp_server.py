@@ -47,6 +47,11 @@ class FakeService:
     def set_settings(self, **kw):
         return {"saved": True, "settings": kw}
 
+    def search(self, keyword, limit=10, context_chars=240, fmt="md"):
+        if not (keyword or "").strip():
+            raise ServiceError("缺少参数:keyword")
+        return {"keyword": keyword, "count": 0, "hits": []}
+
     def close(self):
         pass
 
@@ -293,3 +298,215 @@ def test_serve_tolerates_non_utf8_input():
     lines = [json.loads(x) for x in out.getvalue().strip().splitlines()]
     assert lines[0]["result"] == {}
     assert lines[1]["error"]["code"] == -32700
+
+
+# ---------------------------------------------------------------- v0.1.43 新工具
+
+def test_tools_list_contains_new_tools(server):
+    names = {t["name"] for t in TOOLS}
+    assert {"search_transcript", "check_network"} <= names
+
+
+def test_search_transcript_passes_args(server):
+    captured = {}
+
+    def fake_search(keyword, limit=10, context_chars=240, fmt="md"):
+        captured.update(keyword=keyword, limit=limit, context_chars=context_chars)
+        return {"keyword": keyword, "count": 0, "hits": []}
+
+    server._fake.search = fake_search
+    resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "search_transcript", "arguments": {
+                              "keyword": "关键词", "limit": "3",
+                              "context_chars": 500}}})
+    sc = resp["result"]["structuredContent"]
+    assert captured == {"keyword": "关键词", "limit": 3, "context_chars": 500}
+    assert sc["count"] == 0
+
+
+def test_search_transcript_missing_keyword_is_tool_error(server):
+    resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "search_transcript", "arguments": {}}})
+    assert resp["result"]["isError"] is True
+    assert "keyword" in resp["result"]["structuredContent"]["error"]
+
+
+def test_check_network_quick_mode(server, monkeypatch):
+    from app import netcheck as nc
+    from app.netcheck import NetworkReport, PlatformProbe, ProxyCandidate
+
+    def fake_probe(timeout=4.0):
+        rep = NetworkReport()
+        rep.direct["bilibili"] = PlatformProbe(platform="bilibili", ok=True, ms=100)
+        rep.working_proxy = "http://127.0.0.1:7897"
+        rep.system_proxy = "http://127.0.0.1:7897"
+        rep.proxies = [ProxyCandidate(url="http://127.0.0.1:7897", source="系统代理",
+                                      listening=True, verified=True)]
+        return rep
+
+    monkeypatch.setattr(nc, "probe_network", fake_probe)
+    resp = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                          "params": {"name": "check_network",
+                                     "arguments": {"mode": "quick"}}})
+    sc = resp["result"]["structuredContent"]
+    assert sc["mode"] == "quick"
+    assert sc["working_proxy"] == "http://127.0.0.1:7897"
+    assert sc["direct"]["bilibili"]["ok"] is True
+
+
+def test_check_network_full_includes_browser_scan(server, monkeypatch):
+    from pathlib import Path
+
+    from app import netcheck as nc
+    from app.netcheck import (
+        BrowserInfo, DetectionReport, NetworkReport,
+    )
+
+    monkeypatch.setattr(nc, "probe_network", lambda timeout=4.0: NetworkReport())
+
+    def fake_browser():
+        b = BrowserInfo(key="chrome", label="Chrome", running=True, error="x")
+        b.cookie_db = Path("C:/fake/Cookies")
+        return b
+
+    monkeypatch.setattr(nc, "detect_browsers", lambda: [fake_browser()])
+    monkeypatch.setattr(nc, "detect_cookie_files", lambda dirs, extra_files=(): [])
+    monkeypatch.setattr(nc, "default_cookie_dirs", lambda base, data: [base])
+    monkeypatch.setattr(
+        nc, "build_report",
+        lambda browsers, files, network, **kw: DetectionReport(
+            browsers=browsers, cookie_files=files, network=network,
+            suggested_browser="edge", suggested_cookie_file="",
+            suggested_proxy="http://127.0.0.1:7897", notes=["n1"]))
+    resp = server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                          "params": {"name": "check_network",
+                                     "arguments": {"mode": "full"}}})
+    sc = resp["result"]["structuredContent"]
+    assert sc["suggested"]["browser"] == "edge"
+    b = sc["browsers"][0]
+    assert b["running"] is True
+    assert b["readable"] is False          # property 也进了 JSON
+    assert isinstance(b["cookie_db"], str)  # Path 字符串化
+    assert sc["notes"] == ["n1"]
+
+
+def test_check_network_test_mode(server, monkeypatch):
+    from app import netcheck as nc
+    from app.netcheck import PlatformTest, TestReport
+
+    monkeypatch.setattr(nc, "test_configuration", lambda timeout=4.0: TestReport(
+        items=[PlatformTest(platform="bilibili", network_ok=True, ms=88,
+                            cookie_state="verified", detail="d")],
+        source="cookie_file", summary="OK", warnings=[], ok=True))
+    resp = server.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                          "params": {"name": "check_network",
+                                     "arguments": {"mode": "test"}}})
+    sc = resp["result"]["structuredContent"]
+    assert sc["ok"] is True and sc["platforms"][0]["ms"] == 88
+
+
+def test_check_network_timeout_is_clamped(server, monkeypatch):
+    seen = {}
+    from app import netcheck as nc
+
+    def fake_probe(timeout=4.0):
+        seen["timeout"] = timeout
+        return NetworkReport()
+
+    monkeypatch.setattr(nc, "probe_network", fake_probe)
+    server.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                   "params": {"name": "check_network",
+                              "arguments": {"timeout": 99}}})
+    assert seen["timeout"] == 15.0
+
+
+# ---------------------------------------------------------------- Service.search
+
+def _make_service_with_store(tmp_path):
+    """借真 Store 造两个 done 任务,一个无产物。"""
+    from app.store import Job, Store
+
+    store = Store(tmp_path / "history.db")
+    store.upsert_job(Job(media_id="a_p1", bv="BV1a", title="讲转写的视频",
+                         uploader="u", duration=1.0, url="",
+                         status="done", md_path=str(tmp_path / "a.md"),
+                         txt_path=str(tmp_path / "a.txt")))
+    (tmp_path / "a.md").write_text(
+        "前文\n这里讲到 transformer 的注意力机制,非常重要\n后文", encoding="utf-8")
+    (tmp_path / "a.txt").write_text("txt 版也有注意力机制", encoding="utf-8")
+    store.upsert_job(Job(media_id="b_p1", bv="BV1b", title="另一个",
+                         uploader="u", duration=1.0, url="", status="done"))
+
+    class _S:
+        pass
+
+    svc = _S()
+    svc.store = store
+    from app.headless import Service
+
+    svc.search = Service.search.__get__(svc)
+    yield svc
+    store.close()
+
+
+def test_service_search_finds_keyword_with_context(tmp_path):
+    for svc in _make_service_with_store(tmp_path):
+        out = svc.search("注意力机制")
+        assert out["count"] == 1
+        hit = out["hits"][0]
+        assert hit["media_id"] == "a_p1"
+        assert "transformer" in hit["snippet"]
+        assert hit["position"] > 0
+
+
+def test_service_search_missing_keyword(tmp_path):
+    for svc in _make_service_with_store(tmp_path):
+        assert svc.search("不存在的词")["count"] == 0
+
+
+def test_service_search_requires_keyword(tmp_path):
+    for svc in _make_service_with_store(tmp_path):
+        from app.headless import ServiceError
+
+        with pytest.raises(ServiceError):
+            svc.search("  ")
+        with pytest.raises(ServiceError):
+            svc.search("")
+
+
+def test_service_search_skips_jobs_without_products(tmp_path):
+    for svc in _make_service_with_store(tmp_path):
+        out = svc.search("另一个")  # 标题不在正文检索范围,只搜 md/txt
+        assert out["count"] == 0
+        out2 = svc.search("注意力机制", fmt="txt")
+        assert out2["searched_fmt"] == "txt"
+        assert out2["hits"][0]["path"].endswith("a.txt")
+
+
+def test_check_network_rejects_unknown_mode(server):
+    resp = server.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                          "params": {"name": "check_network",
+                                     "arguments": {"mode": "立刻"}}})
+    assert resp["result"]["isError"] is True
+    assert "quick/full/test" in resp["result"]["structuredContent"]["error"]
+
+
+def test_transcribe_timeout_is_clamped(server, monkeypatch):
+    seen = {}
+
+    def fake_submit(source, **kw):
+        seen["submitted"] = source
+        return {"jobs": [{"media_id": "m1", "status": "queued"}], "total": 1,
+                "skipped": 0}
+
+    def fake_wait(ids, timeout_sec=600.0):
+        seen["timeout"] = timeout_sec
+        return {"jobs": [{"media_id": "m1", "status": "done", "terminal": True}],
+                "all_done": True, "timed_out": False, "waited_sec": 0.1}
+
+    server._fake.submit = fake_submit
+    server._fake.wait = fake_wait
+    server.handle({"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                   "params": {"name": "transcribe", "arguments": {
+                       "source": "BV1x", "wait": True, "timeout_sec": 1e9}}})
+    assert seen["timeout"] == 86400.0  # 1e9 被夹到一天,不会挂死服务

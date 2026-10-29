@@ -564,6 +564,14 @@ bili-transcriber-cli --set engine=sensevoice --set device=cpu
 
 # 预加载模型（等到就绪才退出）
 bili-transcriber-cli --prewarm --json
+
+# 在转写稿正文里检索（转写稿多了以后不用一个个翻）
+bili-transcriber-cli --grep 注意力机制 --limit 5
+
+# AI 接入三件套
+bili-transcriber-cli --doctor                 # 自检:装了哪些客户端、缺什么
+bili-transcriber-cli --agent-config workbuddy --write   # 生成并写入 WorkBuddy 配置
+bili-transcriber-cli --mcp-http               # 起 MCP HTTP 服务(DSH 等用)
 ```
 
 完整参数见 README 的「命令行参考」一节。
@@ -585,7 +593,17 @@ bili-transcriber-cli --prewarm --json
 
 ### 10.2 MCP（给 AI 客户端用）
 
-在 WorkBuddy / Claude Code / DeepSeek-Honey 这类客户端的 MCP 配置里加：
+**最省事的接入方式**（v0.1.43 起）：
+
+```text
+bili-transcriber-cli --doctor                          # 先自检
+bili-transcriber-cli --agent-config workbuddy --write  # 自动写进 ~/.workbuddy/mcp.json
+```
+
+支持 WorkBuddy / DSH / Codex / Claude / Cursor / VS Code / Tare 八种客户端；
+已有配置原样保留、写前自动备份。DSH 的连接表由它自己的界面托管，会生成条目让你手动粘贴。
+
+手动配置（等价）：在客户端的 MCP 配置里加：
 
 ```jsonc
 {"mcpServers": {"bili-transcriber": {
@@ -595,9 +613,17 @@ bili-transcriber-cli --prewarm --json
 
 配好后可以直接对 AI 说「把这个链接转成文字稿」，它会自己调工具完成。
 
-MCP 提供 9 个工具：`transcribe` / `wait_jobs` / `job_status` / `list_jobs` / `get_transcript` / `cancel_job` / `prewarm_model` / `get_settings` / `update_settings`。
+MCP 提供 11 个工具：`transcribe` / `wait_jobs` / `job_status` / `list_jobs` / `get_transcript` / `search_transcript`（转写稿全文检索）/ `check_network`（网络与 Cookie 只读体检）/ `cancel_job` / `prewarm_model` / `get_settings` / `update_settings`。
 
-MCP 服务被设置页关掉时的表现：进程**不进入协议循环**直接退出（码 1），原因写 stderr，stdout 保持干净 —— 客户端会显示「服务启动失败」，把这行 stderr 贴出来就能定位。
+**HTTP 通道**（给拉不起子进程的客户端，如 DSH 的 streamable-http 连接）：
+
+```text
+bili-transcriber-cli --mcp-http        # 端点 http://127.0.0.1:8765/mcp,端口占用自动后移
+```
+
+只绑本机回环、校验 Origin、可选 Bearer token；与 stdio 完全同一套工具。
+
+MCP 服务被设置页关掉时的表现：stdio 与 HTTP 都不启动，原因写 stderr —— 客户端会显示「服务启动失败」，把这行 stderr 贴出来就能定位。
 
 服务端还做了两件兼容：`resources/list` / `prompts/list` 回空清单（而不是 `-32601`），避免个别客户端把整个服务标成不可用；所有非协议输出（含第三方库的 print）都被改道 stderr，不会污染 JSON-RPC 通道。
 

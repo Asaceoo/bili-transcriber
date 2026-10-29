@@ -570,6 +570,14 @@ bili-transcriber-cli --set engine=sensevoice --set device=cpu
 
 # Preload the model (blocks until ready)
 bili-transcriber-cli --prewarm --json
+
+# Full-text search across transcripts
+bili-transcriber-cli --grep "attention" --limit 5
+
+# AI onboarding trio
+bili-transcriber-cli --doctor                          # self-check: which clients, what's missing
+bili-transcriber-cli --agent-config workbuddy --write  # generate & write WorkBuddy config
+bili-transcriber-cli --mcp-http                        # start the MCP HTTP server (for DSH etc.)
 ```
 
 See the "Command-Line Reference" section of the README for the full table.
@@ -591,7 +599,18 @@ Tasks submitted with `--no-wait` are not lost: **the next desktop launch resumes
 
 ### 10.2 MCP (for AI clients)
 
-Add this to your client's MCP config (WorkBuddy, Claude Code, DeepSeek-Honey, …):
+**Easiest onboarding** (v0.1.43+):
+
+```text
+bili-transcriber-cli --doctor                          # self-check first
+bili-transcriber-cli --agent-config workbuddy --write  # writes ~/.workbuddy/mcp.json for you
+```
+
+WorkBuddy / DSH / Codex / Claude / Cursor / VS Code / Tare and a generic preset are supported;
+your existing entries are preserved and a `.bak` backup is written first. DSH's connection
+table is managed by its own UI, so a paste-ready entry is generated instead.
+
+Manual config (equivalent) — add to your client's MCP config:
 
 ```jsonc
 {"mcpServers": {"bili-transcriber": {
@@ -601,9 +620,17 @@ Add this to your client's MCP config (WorkBuddy, Claude Code, DeepSeek-Honey, �
 
 Then just say "transcribe this link" and the client drives the tools itself.
 
-Nine tools are exposed: `transcribe`, `wait_jobs`, `job_status`, `list_jobs`, `get_transcript`, `cancel_job`, `prewarm_model`, `get_settings`, `update_settings`.
+Eleven tools are exposed: `transcribe`, `wait_jobs`, `job_status`, `list_jobs`, `get_transcript`, `search_transcript` (full-text search over transcripts), `check_network` (read-only network & cookie audit), `cancel_job`, `prewarm_model`, `get_settings`, `update_settings`.
 
-When the MCP switch is off, the server **never enters the protocol loop**: it exits with code 1, prints the reason on stderr and keeps stdout clean — the client reports "server failed to start", and that stderr line tells you why.
+**HTTP transport** (for clients that cannot spawn child processes, e.g. DSH's streamable-http):
+
+```text
+bili-transcriber-cli --mcp-http        # endpoint http://127.0.0.1:8765/mcp, auto port fallback
+```
+
+Loopback-only, Origin-checked, optional Bearer token; identical tool set as stdio.
+
+When the MCP switch is off, neither stdio nor HTTP starts; the reason goes to stderr — the client reports "server failed to start", and that stderr line tells you why.
 
 Two interop details: `resources/list` and `prompts/list` return empty lists instead of `-32601` (some clients otherwise mark the whole server unusable), and every non-protocol write — including stray `print` calls from third-party libraries — is redirected to stderr so JSON-RPC framing stays intact.
 

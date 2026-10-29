@@ -353,6 +353,60 @@ class Service:
                 "chars": len(text), "total_chars": total_chars,
                 "truncated": truncated, "content": text}
 
+    def search(self, keyword: str, limit: int = 10,
+               context_chars: int = 240, fmt: str = "md") -> dict:
+        """在已完成任务的转写稿里做全文检索,返回命中行与上下文。
+
+        AI 的高频诉求是"上次那个视频里讲了 XX",逐个 get_transcript 再自己翻
+        既费 token 也容易超限;这里一次把命中点连上下文带 media_id 返回。
+        """
+        keyword = (keyword or "").strip()
+        if not keyword:
+            raise ServiceError("缺少参数:keyword")
+        limit = max(1, min(int(limit if limit not in (None, "") else 10), 50))
+        context_chars = max(40, min(int(context_chars or 240), 2000))
+        fmt = (fmt or "md").lower()
+        if fmt not in ("md", "txt"):
+            fmt = "md"  # srt 是时间轴格式、notes 是讲义,检索正文用 md/txt 才对
+
+        hits: list[dict] = []
+        jobs = self.store.list_jobs("")
+        for job in jobs:
+            if len(hits) >= limit:
+                break
+            if job.status != "done":
+                continue
+            path_map = {"md": job.md_path, "txt": job.txt_path}
+            p = Path(path_map.get(fmt) or "")
+            if not p.exists():
+                p = Path(path_map.get("txt" if fmt == "md" else "md") or "")
+            if not p.exists():
+                continue
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if keyword not in text:
+                continue
+            # 每个 job 只取首个命中,避免长视频把 limit 全吃光
+            idx = text.lower().find(keyword.lower())
+            if idx < 0:
+                continue
+            start = max(0, idx - context_chars // 2)
+            end = min(len(text), idx + len(keyword) + context_chars // 2)
+            snippet = text[start:end].replace("\n", " ").strip()
+            hits.append({
+                "media_id": job.media_id,
+                "title": job.title or job.media_id,
+                "path": str(p),
+                "position": idx,
+                "snippet": ("…" if start > 0 else "") + snippet + ("…" if end < len(text) else ""),
+            })
+            if len(hits) >= limit:
+                break
+        return {"keyword": keyword, "count": len(hits), "hits": hits,
+                "searched_fmt": fmt}
+
     def cancel(self, media_id: str) -> dict:
         self.status(media_id)  # 不存在时抛 ServiceError
         self.pipeline.cancel(media_id)

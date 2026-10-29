@@ -291,3 +291,101 @@ def test_write_ignores_broken_pipe(monkeypatch):
     cli._write("hello")            # 不应抛出
     assert cli._write.__name__ == "_write"
 
+
+
+# ---------------------------------------------------------------- v0.1.43:grep / agent 接入
+
+def test_grep_json(fake, capsys):
+    cli.SERVICE_FACTORY = lambda: fake
+    fake.search = lambda keyword, limit=10, context_chars=240, fmt="md": {
+        "keyword": keyword, "count": 1,
+        "hits": [{"media_id": "a_p1", "title": "T", "path": "a.md",
+                  "position": 3, "snippet": "...注意力机制..."}]}
+    try:
+        assert cli.main(["--grep", "注意力机制", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["count"] == 1
+        assert payload["hits"][0]["media_id"] == "a_p1"
+    finally:
+        cli.SERVICE_FACTORY = cli.Service
+
+
+def test_grep_human_output(fake, capsys):
+    cli.SERVICE_FACTORY = lambda: fake
+    fake.search = lambda keyword, limit=10, context_chars=240, fmt="md": {
+        "keyword": keyword, "count": 0, "hits": []}
+    try:
+        assert cli.main(["--grep", "不存在"]) == 0
+        assert "未命中" in capsys.readouterr().out
+    finally:
+        cli.SERVICE_FACTORY = cli.Service
+
+
+def test_grep_requires_service(fake, capsys):
+    # 无 --json 时缺 Service 也能安全走完(搜索引擎缺产物 → 未命中)
+    cli.SERVICE_FACTORY = lambda: fake
+    fake.search = lambda *a, **k: {"keyword": "x", "count": 0, "hits": []}
+    try:
+        assert cli.main(["--grep", "x"]) == 0
+    finally:
+        cli.SERVICE_FACTORY = cli.Service
+
+
+def test_agent_config_workbuddy_stdout(capsys):
+    assert cli.main(["--agent-config", "workbuddy"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert "bili-transcriber" in data["mcpServers"]
+
+
+def test_agent_config_codex_http(capsys):
+    assert cli.main(["--agent-config", "codex", "--transport", "http",
+                     "--mcp-port", "9001"]) == 0
+    out = capsys.readouterr().out
+    assert "[mcp_servers.bili-transcriber]" in out
+    assert "http://127.0.0.1:9001/mcp" in out
+
+
+def test_agent_config_unknown_client_exit_2(capsys):
+    assert cli.main(["--agent-config", "nope"]) == 2
+
+
+def test_agent_config_http_for_unsupported_client_exit_2(capsys):
+    assert cli.main(["--agent-config", "tare", "--transport", "http"]) == 2
+
+
+def test_agent_config_write_creates_file(tmp_path, monkeypatch, capsys):
+    import app.agent_setup as A
+
+    monkeypatch.setattr(A, "default_config_path",
+                        lambda spec, home=None: tmp_path / "mcp.json")
+    assert cli.main(["--agent-config", "workbuddy", "--write"]) == 0
+    text = (tmp_path / "mcp.json").read_text(encoding="utf-8")
+    assert "bili-transcriber" in text
+
+
+def test_agent_list_reports_clients(capsys):
+    assert cli.main(["--agent-list", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    keys = {c["key"] for c in payload["clients"]}
+    assert {"workbuddy", "dsh", "codex"} <= keys
+
+
+def test_doctor_reports_stdio_and_http(capsys):
+    assert cli.main(["--doctor", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["stdio"]["args"] == ["-m", "app.mcp_server"]
+    assert payload["http"]["url"].endswith("/mcp")
+    assert "clients" in payload
+
+
+def test_mcp_http_gated_by_channel(tmp_path, monkeypatch, capsys):
+    """设置页关闭 MCP 时 --mcp-http 也要被拦,退出码 3。"""
+    monkeypatch.setattr(cli, "channel_block_reason", lambda ch: "MCP 已关闭")
+    assert cli.main(["--mcp-http", "8123", "--json"]) == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["channel"] == "mcp"
+
+
+def test_agent_config_dsh_write_rejected(capsys):
+    assert cli.main(["--agent-config", "dsh", "--write"]) == 1
+    assert "界面托管" in capsys.readouterr().out
