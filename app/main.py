@@ -415,12 +415,14 @@ def main() -> None:
         # 所以只在确实要原生窗口时才带这个参数。
         run_kwargs["window_size"] = (980, 720)
     started = time.monotonic()
-    try:
-        ui.run(**run_kwargs)
-    finally:
-        logger.info("界面已退出,本次运行 %.1f 秒", time.monotonic() - started)
-    # ui.run 返回后进程随即退出(托盘"退出"经 app.shutdown 走到这里);
-    # 不做显式清理:daemon 线程随进程消亡,避免测试环境 timer 访问已关闭的 store。
+    ui.run(**run_kwargs)
+    # 注意:关窗退出走 nicegui 的 core.stop_and_exit() → os._exit(),下面这段
+    # **不会**执行(nicegui 文档里明确写了"trailing finally 不会运行")。只有托盘
+    # "退出"这类让 ui.run 正常返回的路径才会打印这一行 —— 用它区分"正常收尾"和
+    # "窗口进程死了被硬退",不要指望它在每次退出时都出现。
+    logger.info("界面已退出,本次运行 %.1f 秒", time.monotonic() - started)
+    # ui.run 返回后进程随即退出;不做显式清理:daemon 线程随进程消亡,
+    # 避免测试环境 timer 访问已关闭的 store。
 
 
 if __name__ in {"__main__", "__mp_main__"}:
