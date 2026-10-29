@@ -270,9 +270,12 @@ def test_write_config_jsonc_gives_actionable_error():
         assert target.read_text(encoding="utf-8") == before  # 原文件未动
 
 
-def test_render_cli_frozen_has_no_cli_flag():
-    """回归:frozen 片段曾生成非法 --cli 参数,客户端复制即报错。"""
+def test_render_cli_frozen_includes_cli_flag():
+    """冻结版片段必须带 --cli:exe 入口是 GUI 分发器,--cli 才进 CLI
+    (真机冒烟 `bili-transcriber.exe --doctor` 直接起 GUI 才发现的)。
+    源码版 python -m app.cli 本身就是 CLI,不能带 --cli。"""
     from app.agent_setup import render_cli
-    text = render_cli(frozen=True, exe="bili-transcriber.exe")
-    assert "--cli" not in text
-    assert "bili-transcriber.exe" in text
+    frozen_text = render_cli(frozen=True, exe="bili-transcriber.exe")
+    assert "--cli" in frozen_text and "bili-transcriber.exe" in frozen_text
+    src_text = render_cli(frozen=False)
+    assert "--cli" not in src_text and "python -m app.cli" in src_text

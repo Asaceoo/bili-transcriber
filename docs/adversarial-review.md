@@ -70,13 +70,14 @@
 
 | # | 发现 | 真实证据 | 修复 | 复验 |
 |---|---|---|---|---|
-| 4.6 | `render_cli(frozen=True)` 生成的示例命令带**非法 `--cli` 参数** —— AI 复制粘贴即 `unrecognized arguments` | 真机 `bili-transcriber.exe --cli ...` 报错；片段渲染复现 | 片段去掉 `--cli`（CLI 无需该参数） | frozen/源码两形态片段均无 `--cli`；回归锁定 |
+| 4.6 | ~~`render_cli(frozen=True)` 生成含非法 `--cli` 参数~~ **本条为误修,v0.1.44 真机冒烟时纠正**：`--cli` 是冻结版必需的模式开关（exe 入口是 GUI 分发器,不带 `--cli` 跑 `--doctor` 会直接启动 GUI 窗口）；源码版 `python -m app.cli` 才不带它。原实现本就正确 | 误修证据:只验证了源码模式 `python -m app.cli --cli` 报错,未做冻结版真机验证;打包后 PowerShell 真机跑 `bili-transcriber.exe --doctor` 起了 GUI 才发现 | 恢复 frozen 分支 `--cli`；回归测试改为"冻结版必含 / 源码版必不含"双向断言 | 真机 `bili-transcriber.exe --cli --doctor --json` 输出正确 doctor JSON |
 | 4.7 | `--agent-config --write` 遇 JSONC 配置（Cursor/VS Code 的 mcp.json 常带 `//` 注释）→ 裸 JSONDecodeError traceback，AI 无从下手 | 闭环脚本：`JSONDecodeError: Expecting property name...`（原文件 intact） | 捕获后抛 ValueError：指明"文件含注释、原文件未动、粘贴这段片段"；片段随错误给出 | 报错含"注释"+"mcpServers"+片段；回归锁定 |
 | 4.8 | 11 工具边界值轰炸（未知工具/非字符串 name/超大与负 timeout/负 limit/空 keyword/非法 mode/10MB keyword） | 真实 stdio 管道逐个喂：全部返回可读 `isError` 结构或夹紧生效，零 traceback 泄漏 | 无需修 —— 夹紧与校验层经此轮加固后已达标 | 8+3 用例期望行为逐项匹配 |
 
 ### 本轮方法论教训
 
-- **测试全绿 ≠ 真机可用**：4.1/4.4/4.6 三个 bug 都在"测试覆盖不到的组装层"（CLI 入口、用户手写的配置变体、文档片段）。CLI 包装入口必须至少一条子进程级 e2e。
+- **测试全绿 ≠ 真机可用**：4.1/4.4 两个 bug 都在"测试覆盖不到的组装层"（CLI 入口、用户手写的配置变体）。CLI 包装入口必须至少一条子进程级 e2e。
+- **真机验证必须覆盖交付形态**：4.6 误修的根源是只验证了源码形态。`render_cli` 的消费方是打包版 exe —— 打包后必须用**冻结包本体**冒烟（本次就是发布前真机跑 `--doctor` 起了 GUI 才抓回）。
 - **配对操作要同防**：4.5 —— 给 POST 上锁时问一句"DELETE/GET 呢"。
 - **用户手写配置是脏数据**：4.4/4.7 —— 合并逻辑必须容忍注释、空格、JSONC，容忍不了就明确拒绝并给出路。
 

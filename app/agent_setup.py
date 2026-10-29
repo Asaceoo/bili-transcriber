@@ -180,7 +180,11 @@ def render_cli(*, exe: str | None = None, frozen: bool | None = None) -> str:
     """只能执行 shell 的 Agent 用的命令片段(POSIX + PowerShell 两版)。"""
     is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if is_frozen:
-        base = f'"{exe or "bili-transcriber.exe"}"'
+        # 冻结版入口是 main.py 的 GUI 分发器:必须显式 --cli 才进 CLI
+        # (源码版 python -m app.cli 本身就是 CLI,不带 --cli)。
+        # v0.1.44 前曾误删 —— 真机冒烟 `bili-transcriber.exe --doctor`
+        # 直接起了 GUI,才还原真相。
+        base = f'"{exe or "bili-transcriber.exe"}" --cli'
     else:
         base = "python -m app.cli"
     return (
