@@ -15,6 +15,7 @@ import io
 import json
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,6 +24,7 @@ from pathlib import Path
 OWNER, REPO = "Asaceoo", "bili-transcriber"
 API = f"https://api.github.com/repos/{OWNER}/{REPO}"
 UPLOAD = f"https://uploads.github.com/repos/{OWNER}/{REPO}/releases"
+ATTEMPTS = 3  # 单资产最多传几次(1.3GB 的 GPU 包在大陆网络上常被 408 打断)
 
 
 def _token() -> str:
@@ -123,23 +125,35 @@ def main() -> None:
     existing = {a["name"]: a["id"] for a in (rel.get("assets") or [])} if rel else {}
     for a in assets:
         name = a.name
-        if name in existing:
-            st, _ = _api("DELETE", f"{API}/releases/assets/{existing[name]}", tok)
-            print(f"[asset] 删除旧资产 {name} (HTTP {st})")
         size = a.stat().st_size
-        # 文件流式上传:GPU 包可达 2GB+,read_bytes() 会整份驻留内存,低配机易 OOM
-        with a.open("rb") as fh:
-            st, body = _api(
-                "POST", f"{UPLOAD}/{release_id}/assets?name={urllib.parse.quote(name)}", tok,
-                data=fh,
-                headers={"Content-Type": "application/octet-stream",
-                         "Content-Length": str(size)},
-            )
-        ok = st in (201, 200)
-        print(f"[asset] {'OK ' if ok else 'FAIL'} {name} ({size/1e6:.1f} MB, HTTP {st})")
-        if not ok:
-            print(f"        {body}")
-            sys.exit(1)
+        # GPU 包 1.3GB+,单次 PUT 跑到一半遇上网络抖动就会被 GitHub 的
+        # "Upload body timed out due to inactivity"(HTTP 408)整单打回,
+        # 而 GitHub 的资产上传不支持断点续传 —— 只能整份重来。所以给每个
+        # 资产最多 ATTEMPTS 次机会,重试前先清掉可能残留的半截同名资产。
+        for attempt in range(1, ATTEMPTS + 1):
+            if name in existing:
+                st, _ = _api("DELETE", f"{API}/releases/assets/{existing[name]}", tok)
+                print(f"[asset] 删除旧资产 {name} (HTTP {st})")
+                existing.pop(name, None)
+            # 文件流式上传:GPU 包可达 2GB+,read_bytes() 会整份驻留内存,低配机易 OOM
+            with a.open("rb") as fh:
+                st, body = _api(
+                    "POST", f"{UPLOAD}/{release_id}/assets?name={urllib.parse.quote(name)}", tok,
+                    data=fh,
+                    headers={"Content-Type": "application/octet-stream",
+                             "Content-Length": str(size)},
+                )
+            if st in (201, 200):
+                print(f"[asset] OK  {name} ({size/1e6:.1f} MB, 第 {attempt} 次)")
+                break
+            print(f"[asset] 第 {attempt}/{ATTEMPTS} 次失败 {name} "
+                  f"({size/1e6:.1f} MB, HTTP {st}): {body}")
+            if attempt == ATTEMPTS:
+                print("[release] 该资产多次重试仍失败,中止")
+                sys.exit(1)
+            wait = 10 * attempt
+            print(f"[asset] {wait}s 后重试…")
+            time.sleep(wait)
     print("[release] 全部资产上传完成")
 
 
