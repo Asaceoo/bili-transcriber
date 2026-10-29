@@ -154,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
 │   ├── e2e_check.py            # 端到端链路检查
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（28 文件 / 512 用例）
+├── tests/                      # pytest（29 文件 / 525 用例）
 ├── docs/                       # 双语手册 + assets/ 概念图
 ├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
 ├── output/                     # 转写产物（运行时）
@@ -761,7 +761,7 @@ python scripts/release.py --single-only# 仅重建单文件版
 
 ## 12. 测试体系
 
-`tests/` 共 **28 个文件 / 512 用例**，全绿约 2 分钟。
+`tests/` 共 **29 个文件 / 525 用例**，全绿约 2 分钟。
 
 | 领域 | 文件 | 策略 |
 |---|---|---|
@@ -791,6 +791,13 @@ python scripts/release.py --single-only# 仅重建单文件版
 | **AI 使用方** | 参数是否好传、错误是否可读、状态是否可判 | `running` 语义、stalled 提示、`_arg_int` 容错 |
 
 原则：**先拿到真实报错再改**。上面每一条修复都对应一次实际运行的失败输出，而不是"看起来可能有问题"。
+
+v0.1.43 发布后连续三轮换攻击面复审（HTTP 传输 / 配置合并 / 服务层检索与设置），
+累计收敛 **10 个真 bug + 5 项加固**，包括：TOML 合并遇行尾注释会让 Codex
+config.toml 全崩（tomllib 实证）、`search` 大小写不敏感完全失效（双重检查基准
+不一致）、`--mcp-http` 真实路径缺 `import sys`（517 项测试全绿仍漏网）、
+HTTP `DELETE` 无鉴权、JSONC 配置裸 traceback 等 —— 全记录见
+[`docs/adversarial-review.md`](adversarial-review.md)。
 
 ### 12.2 运行
 

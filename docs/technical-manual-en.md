@@ -155,7 +155,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (28 files / 512 cases)
+├── tests/                      # pytest (29 files / 525 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -758,7 +758,7 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **28 files / 512 cases**, green in about 2 minutes.
+`tests/` holds **29 files / 525 cases**, green in about 2 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|
@@ -788,6 +788,15 @@ This project uses three-perspective iterative review:
 | **AI consumer** | Are args easy to pass? Are errors readable? Is state decidable? | `running` semantics, stalled hints, `_arg_int` coercion |
 
 The rule: **reproduce a real failure before fixing anything.** Every fix above corresponds to an actual failing run, not a "looks suspicious" hunch.
+
+After the v0.1.43 release, three further review rounds with rotating attack surfaces
+(HTTP transport / config merging / service-layer search & settings) converged a total
+of **10 real bugs + 5 hardening items**, including: TOML merging breaking the whole
+Codex config.toml on trailing comments (proven via tomllib), `search` case-insensitivity
+completely inert (inconsistent comparison baselines), the real `--mcp-http` path crashing
+on a missing `import sys` despite 517 green tests, unauthenticated HTTP `DELETE`, and a
+raw traceback on JSONC configs — full record in
+[`docs/adversarial-review.md`](adversarial-review.md).
 
 ### 12.2 Running
 
