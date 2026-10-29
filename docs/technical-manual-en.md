@@ -1,8 +1,8 @@
 # bili-transcriber — Technical Manual (English)
 
 > For developers and maintainers. Covers layering, the concurrency model, the state machine, module responsibilities, data contracts, security boundaries, packaging pitfalls, and the test suite.
-> This manual matches **v0.1.41** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
-> The versioned release copy is [technical-manual-en-0.1.41.md](technical-manual-en-0.1.41.md).
+> This manual matches **v0.1.42** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [technical-manual-en-0.1.42.md](technical-manual-en-0.1.42.md).
 
 ---
 

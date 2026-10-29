@@ -1,7 +1,7 @@
 # bili-transcriber — User Guide (English)
 
 > For end users. Covers installation, the three tabs, every setting, output layout, and troubleshooting.
-> 发布版本快照 **v0.1.40** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
+> 发布版本快照 **v0.1.42** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ---
 
@@ -102,13 +102,36 @@ If you extract it wrong, nothing errors — the app silently falls back to CPU, 
 
 ## 3. First Launch
 
-On launch the app:
+Double-clicking the app opens a **standalone application window** (not a browser tab):
 
 1. Starts a local server on `http://127.0.0.1:8765` by default.
-2. Opens that address in your default browser.
-3. Keeps running when you close the browser tab — it lives in the system tray.
+2. Renders the "B站音频本地转写" window with WebView2, 980×720.
+3. Closing the window quits the app; use the tray if you want it to keep running.
 
-**Right-click the tray icon** for "Open main window" and "Exit". To actually quit, use Exit.
+> A cold start has to load torch/transformers, so the first window takes roughly 10–20 seconds
+> (faster on an SSD). Don't double-click again during that window — the second process waits for
+> the window to appear, brings it to the front and exits.
+
+**Right-click the tray icon** for "Open main window" and "Exit". In native mode, "Open main window"
+**raises the existing window** instead of opening a browser.
+
+### Window or browser?
+
+| Situation | Behaviour |
+|---|---|
+| WebView2 present (default on Win10/11) | **Standalone window** (recommended) |
+| No WebView2 | Falls back to the browser, same features |
+| Force the browser | Set `BILI_FORCE_BROWSER=1` |
+| Force the window without detection | Set `BILI_FORCE_NATIVE=1` and install the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) |
+| Using the **single-file** `bili-transcriber-single-*.exe` | Still the browser: onefile unpacks to a temp dir per run and deletes it on exit, which makes a native window unstable there — the build pins browser mode |
+
+```powershell
+# Fall back to the browser if the window misbehaves (e.g. a GPU driver crashing WebView2)
+$env:BILI_FORCE_BROWSER = "1"
+```
+
+The window's WebView2 profile lives in `data\webview2\`. Deleting it resets the UI cache; task
+history is untouched.
 
 ### Port conflicts
 
@@ -124,19 +147,12 @@ Then relaunch. From source this is enough; with the installer, open PowerShell, 
 
 The app enforces a **single instance**. Double-clicking the shortcut again means the second process:
 
-1. Detects the running instance → points your browser at the existing window → exits.
+1. Polls for the existing window (up to 30 seconds, covering cold start);
+2. Restores it and **brings it to the front**, then exits.
 
-So seeing "instance already running, opened the existing window" is not an error — it's by design. It prevents two processes from working the same queue and deleting each other's intermediate files.
-
-### Native window mode (experimental)
-
-The browser mode is the default because it is the most compatible. For a standalone window (WebView2 required):
-
-```powershell
-$env:BILI_FORCE_NATIVE = "1"
-```
-
-The single-file build may show a blank window in native mode, which is why it is off by default.
+So a second double-click just brings the window back — no stray browser tab, no silent flash-and-exit.
+If no window can be found (e.g. the first instance runs in browser mode), a message box tells you the
+app is already running.
 
 ---
 
@@ -305,21 +321,74 @@ Switching engines **swaps the model dropdown** to that engine's list, so combina
 | Model directory | Defaults to `%LOCALAPPDATA%\Bili Note\models`; point elsewhere or drop manually downloaded model packs here |
 | Workers | Download/convert threads, 1–6, default 2 |
 
-### 7.3 Network and Login
+### 7.3 Network and Login (one-click detection)
+
+This section has three inputs and a three-step flow. **The recommended path is one sentence:
+click "Detect network & cookies" → let it fill things in → click "② Test connection" → click "③ Save settings".**
 
 | Setting | Description |
 |---|---|
-| Browser cookies | Choose Chrome / Edge / Firefox / Brave / Opera / Vivaldi. The app reads cookies from that browser's logged-in profile. **Log in to the target site in that browser first** |
-| cookies.txt | Path to a Netscape-format cookie file. **Takes precedence over browser cookies** |
-| Proxy | e.g. `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. Needed for YouTube and similar |
+| Browser cookies | Chrome / Edge / Firefox / Brave / Chromium / Opera / Vivaldi. The app reads cookies from that browser's logged-in profile. **Log in to the target site in that browser first** |
+| cookies.txt | Path to a Netscape-format cookie file. **Takes precedence over browser cookies** and is unaffected by whether the browser is open |
+| Proxy | e.g. `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. Needed for YouTube. The "Probe" button finds it automatically |
 
-When cookies matter:
+#### What detection does
 
-- Douyin "Featured" content (regular videos usually work without)
-- Some YouTube videos (age or membership gated)
-- Bilibili high-bitrate or premium content
+One click (5–8 seconds) runs three things in parallel:
 
-Getting a cookies.txt: install a cookie-export extension, export in Netscape format, save it locally, then paste the path into Settings.
+1. **Browser scan** — enumerates installed Chrome / Edge / Brave / Vivaldi / Chromium / Opera / Firefox and
+   reports which platforms (Bilibili, Douyin, Xiaohongshu, Kuaishou, YouTube) you are logged in to.
+   It reads only cookie **domain, name and expiry** — never the value.
+2. **cookies.txt search** — app directory, `data/`, Downloads, Desktop, Documents.
+3. **Network probe** — per-platform latency plus system proxy / env-var proxy / common local ports
+   (7890, 7897, 10809, 1080…), each verified against YouTube.
+
+It then picks the source with the widest coverage and **fills the three inputs for you**, explaining why:
+
+```
+Platforms   ✅ Bilibili  ✅ Douyin  ⚪ Xiaohongshu  ⚪ Kuaishou  ⚪ YouTube
+Network     ✅ Bilibili 383ms  ✅ Douyin 277ms  …  ❌ YouTube direct blocked
+Proxy       ✅ http://127.0.0.1:7897 works
+· Chrome/Edge are running, so their cookie DB is locked: close them and re-detect, or use cookies.txt
+```
+
+> **Auto-fill has boundaries**: it only overwrites when it finds a strictly better source and never
+> clears a working configuration. If nothing is detected it keeps your values and says why.
+
+#### Detection vs. Test connection
+
+| | Detect | ② Test connection |
+|---|---|---|
+| Network | Probes reachability | Probes again, **through the proxy you configured** |
+| Cookies | Metadata only (name/expiry) | Real cookie values |
+| Answers | "What should I fill in?" | "Does this configuration work now?" |
+| Output | Three auto-filled values | One row per platform: latency + login state + detail |
+
+For Bilibili the test calls the official `nav` endpoint and **shows your account name**; Douyin /
+Xiaohongshu / Kuaishou require request signing, so they are reported as "logged in" (cookie present)
+rather than "verified".
+
+#### When cookies or a proxy are actually needed
+
+| Platform | Cookie? | Proxy? | Notes |
+|---|---|---|---|
+| Bilibili | Mostly no | No | 1080P+ / premium / some series need login |
+| Douyin | **Recommended** | No | Anonymous requests are often rate-limited |
+| Xiaohongshu | **Recommended** | No | Full video URLs require login |
+| Kuaishou | Rarely | No | Share-page parsing, no login |
+| YouTube | Sometimes | **Required** | Age/member-gated videos; blocked in mainland China |
+
+#### Choosing between the three sources
+
+1. **Browser cookies (easiest)** — reads the login state of your browser. Downside: while the browser
+   **is running**, its cookie DB is exclusively locked, so detection fails and cookie-dependent downloads fail too.
+2. **cookies.txt (most stable)** — takes precedence and is immune to the lock. Expand
+   "Three cookie sources" in Settings and use "Export cookies.txt from browser" (close the browser first);
+   it writes `data/cookies.txt` and fills the path for you.
+3. **Neither** — public content only; enough for ordinary Bilibili videos.
+
+> The exported cookies.txt contains login credentials and lives only in the local `data/` directory.
+> Do not share it or commit it.
 
 ### 7.4 Model Management
 

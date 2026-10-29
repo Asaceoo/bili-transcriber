@@ -1,8 +1,8 @@
 # bili-transcriber — User Guide (English)
 
 > For end users. Covers installation, the three tabs, every setting, output layout, and troubleshooting.
-> This guide matches **v0.1.41** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
-> The versioned release copy is [user-guide-en-0.1.41.md](user-guide-en-0.1.41.md).
+> This guide matches **v0.1.42** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [user-guide-en-0.1.42.md](user-guide-en-0.1.42.md).
 
 ---
 
@@ -335,7 +335,7 @@ click "Detect network & cookies" → let it fill things in → click "② Test c
 
 #### What detection does
 
-One click (3–5 seconds) runs three things in parallel:
+One click (5–8 seconds) runs three things in parallel:
 
 1. **Browser scan** — enumerates installed Chrome / Edge / Brave / Vivaldi / Chromium / Opera / Firefox and
    reports which platforms (Bilibili, Douyin, Xiaohongshu, Kuaishou, YouTube) you are logged in to.

@@ -431,7 +431,8 @@ def main_page() -> None:
                             "一键检测本机网络与 Cookie", icon="travel_explore",
                             on_click=lambda: _run_detect(),
                         ).props("unelevated no-caps color=primary").classes("bili-cta")
-                        detect_hint = ui.label("约 3~5 秒").classes("text-xs text-grey-5")
+                        # 实测 5~8 秒(取决于 YouTube 直连是否要等超时),别写成更短的数字
+                        detect_hint = ui.label("约 5~8 秒").classes("text-xs text-grey-5")
 
                     net_progress = ui.linear_progress(value=0, show_value=False) \
                         .props("rounded size=6px instant-feedback color=primary").classes("w-full")

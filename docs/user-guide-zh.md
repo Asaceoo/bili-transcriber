@@ -1,8 +1,8 @@
 # bili-transcriber 用户手册（中文）
 
 > 面向使用者。讲清安装、界面、设置、输出与排障。
-> 本手册对应 **v0.1.41** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
-> 带版本号的发布快照见 [user-guide-zh-0.1.41.md](user-guide-zh-0.1.41.md)。
+> 本手册对应 **v0.1.42** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
+> 带版本号的发布快照见 [user-guide-zh-0.1.42.md](user-guide-zh-0.1.42.md)。
 
 ---
 
@@ -332,7 +332,7 @@ $env:BILI_PORT = "9000"
 
 #### 一键检测做了什么
 
-点一下按钮（约 3~5 秒），程序并行做三件事：
+点一下按钮（约 5~8 秒），程序并行做三件事：
 
 1. **扫浏览器**——枚举本机已装的 Chrome / Edge / Brave / Vivaldi / Chromium / Opera / Firefox，
    看你在哪些平台有登录态（B 站、抖音、小红书、快手、YouTube）。

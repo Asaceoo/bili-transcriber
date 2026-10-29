@@ -1,8 +1,8 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。讲清架构分层、并发模型、状态机、模块职责、数据契约、安全边界、打包坑位与测试体系。
-> 本手册对应 **v0.1.41** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
-> 带版本号的发布快照见 [technical-manual-zh-0.1.41.md](technical-manual-zh-0.1.41.md)。
+> 本手册对应 **v0.1.42** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
+> 带版本号的发布快照见 [technical-manual-zh-0.1.42.md](technical-manual-zh-0.1.42.md)。
 
 ---
 
