@@ -1,7 +1,7 @@
 # bili-transcriber 用户手册（中文）
 
 > 面向使用者。讲清安装、界面、设置、输出与排障。
-> 发布版本快照 **v0.1.41** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
+> 发布版本快照 **v0.1.44** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ---
 
@@ -318,21 +318,71 @@ $env:BILI_PORT = "9000"
 | 模型目录 | 默认 `%LOCALAPPDATA%\Bili Note\models`。可指定别处，或放手动下载的模型包 |
 | 并发数 | 下载 / 转码的并发线程数，1~6，默认 2 |
 
-### 7.3 网络与登录
+### 7.3 网络与登录（一键检测）
+
+设置页这一节有四个东西：三个输入框 + 一条三步流程。**推荐用法只有一句话：
+点「一键检测本机网络与 Cookie」→ 看它自动填好 → 点「② 测试连接」→ 点「③ 保存设置」。**
 
 | 设置 | 说明 |
 |---|---|
-| 浏览器 Cookie | 下拉选 Chrome / Edge / Firefox / Brave / Opera / Vivaldi。程序会去读该浏览器已登录的 Cookie。**使用前请先在该浏览器登录目标网站** |
-| cookies.txt | Netscape 格式的 cookie 文件路径。**优先级高于浏览器 Cookie** |
-| 网络代理 | 如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`。YouTube 等境外平台需要 |
+| 浏览器 Cookie | 下拉选 Chrome / Edge / Firefox / Brave / Chromium / Opera / Vivaldi。程序会读该浏览器已登录的 Cookie。**使用前请先在该浏览器登录目标网站** |
+| cookies.txt | Netscape 格式的 cookie 文件路径。**优先级高于浏览器 Cookie**，也不受浏览器开关影响，最稳 |
+| 网络代理 | 如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`。YouTube 等境外平台需要。点右侧「探测」可自动找 |
 
-什么时候要 Cookie：
+#### 一键检测做了什么
 
-- 抖音「精选」类内容（普通视频通常不需要）
-- 部分 YouTube 视频（需要登录确认年龄 / 会员）
-- B 站高码率或大会员内容
+点一下按钮（约 5~8 秒），程序并行做三件事：
 
-cookies.txt 怎么来：浏览器装一个导出 cookie 的扩展，导出 Netscape 格式，存到本地，把路径填进设置。
+1. **扫浏览器**——枚举本机已装的 Chrome / Edge / Brave / Vivaldi / Chromium / Opera / Firefox，
+   看你在哪些平台有登录态（B 站、抖音、小红书、快手、YouTube）。
+   它只读 Cookie 的**域名、名字、有效期**，不读取也不解密 Cookie 内容。
+2. **找 cookies.txt**——在程序目录、`data/`、下载、桌面、文档里搜名字带 cookie 的 `.txt`。
+3. **探网络**——各平台直连延迟，以及系统代理 / 环境变量代理 / 常见本机端口
+   （7890、7897、10809、1080…），并验证哪个代理真能访问 YouTube。
+
+结束后它会按「覆盖平台数」挑最优来源**自动填进上面三个框**，并在结果区说明为什么这么填：
+
+```
+平台登录态   ✅ B 站  ✅ 抖音  ⚪ 小红书  ⚪ 快手  ⚪ YouTube
+网络         ✅ B 站 383ms  ✅ 抖音 277ms  …  ❌ YouTube 直连不通
+代理         ✅ http://127.0.0.1:7897 可用
+· Chrome、Edge 正在运行，Cookie 库被独占锁定：关闭浏览器后重新检测更准，或改用 cookies.txt
+```
+
+> **自动填写有边界**：只在识别到更优来源时才改，绝不会把你自己填好的配置清空。
+> 什么都没识别到（比如浏览器没登录过任何平台），它就保持原样并告诉你原因。
+
+#### 「测试连接」和「检测」有什么不同
+
+| | 一键检测 | ② 测试连接 |
+|---|---|---|
+| 联网 | 探测平台可达性 | 同样探测，但**用你当前填的代理** |
+| 读 Cookie | 只读元信息（名字/有效期） | 真读 Cookie 值 |
+| 能回答 | 「应该填什么」 | 「现在这套配置能不能用」 |
+| 结果 | 自动填好的三个值 | 每个平台一行：延迟 + 登录状态 + 说明 |
+
+测试里 B 站会调一次官方 `nav` 接口做真登录校验，**能显示你的账号名**；抖音 / 小红书 / 快手
+接口需要额外签名，只确认登录 Cookie 存在，状态显示为「已登录」而不是「已登录（已校验）」。
+
+#### 什么时候真的需要 Cookie / 代理
+
+| 平台 | 需要 Cookie? | 需要代理? | 说明 |
+|---|---|---|---|
+| B 站 | 多数不需要 | 不需要 | 1080P+ / 大会员 / 部分番剧要登录态 |
+| 抖音 | **建议要** | 不需要 | 未登录常被风控，报 cookie 错误 |
+| 小红书 | **建议要** | 不需要 | 登录后才返回完整视频地址 |
+| 快手 | 一般不需要 | 不需要 | 走分享页解析，无需登录 |
+| YouTube | 部分需要 | **必须** | 年龄限制 / 会员视频要登录；境内需代理 |
+
+#### 三种来源怎么选
+
+1. **浏览器 Cookie（最省事）**——直接读你浏览器里的登录态。缺点是浏览器**正在运行时**
+   Cookie 库被独占锁定，既读不到、下载带有 Cookie 的内容也会失败。
+2. **cookies.txt（最稳）**——优先级更高，不受浏览器开关影响。设置页展开「三种 Cookie 来源怎么选」
+   里有「从浏览器导出 cookies.txt」按钮（需先关闭浏览器），导出到 `data/cookies.txt` 并自动填入路径。
+3. **都不用**——只下载公开内容，B 站普通视频足够。
+
+> 导出的 cookies.txt 内含登录凭据，只存在本机 `data/` 目录，不要发给别人或提交到仓库。
 
 ### 7.4 模型管理
 
@@ -513,6 +563,14 @@ bili-transcriber-cli --set engine=sensevoice --set device=cpu
 
 # 预加载模型（等到就绪才退出）
 bili-transcriber-cli --prewarm --json
+
+# 在转写稿正文里检索（转写稿多了以后不用一个个翻）
+bili-transcriber-cli --grep 注意力机制 --limit 5
+
+# AI 接入三件套
+bili-transcriber-cli --doctor                 # 自检:装了哪些客户端、缺什么
+bili-transcriber-cli --agent-config workbuddy --write   # 生成并写入 WorkBuddy 配置
+bili-transcriber-cli --mcp-http               # 起 MCP HTTP 服务(DSH 等用)
 ```
 
 完整参数见 README 的「命令行参考」一节。
@@ -534,7 +592,17 @@ bili-transcriber-cli --prewarm --json
 
 ### 10.2 MCP（给 AI 客户端用）
 
-在 WorkBuddy / Claude Code / DeepSeek-Honey 这类客户端的 MCP 配置里加：
+**最省事的接入方式**（v0.1.43 起）：
+
+```text
+bili-transcriber-cli --doctor                          # 先自检
+bili-transcriber-cli --agent-config workbuddy --write  # 自动写进 ~/.workbuddy/mcp.json
+```
+
+支持 WorkBuddy / DSH / Codex / Claude / Cursor / VS Code / Tare 八种客户端；
+已有配置原样保留、写前自动备份。DSH 的连接表由它自己的界面托管，会生成条目让你手动粘贴。
+
+手动配置（等价）：在客户端的 MCP 配置里加：
 
 ```jsonc
 {"mcpServers": {"bili-transcriber": {
@@ -544,9 +612,17 @@ bili-transcriber-cli --prewarm --json
 
 配好后可以直接对 AI 说「把这个链接转成文字稿」，它会自己调工具完成。
 
-MCP 提供 9 个工具：`transcribe` / `wait_jobs` / `job_status` / `list_jobs` / `get_transcript` / `cancel_job` / `prewarm_model` / `get_settings` / `update_settings`。
+MCP 提供 11 个工具：`transcribe` / `wait_jobs` / `job_status` / `list_jobs` / `get_transcript` / `search_transcript`（转写稿全文检索）/ `check_network`（网络与 Cookie 只读体检）/ `cancel_job` / `prewarm_model` / `get_settings` / `update_settings`。
 
-MCP 服务被设置页关掉时的表现：进程**不进入协议循环**直接退出（码 1），原因写 stderr，stdout 保持干净 —— 客户端会显示「服务启动失败」，把这行 stderr 贴出来就能定位。
+**HTTP 通道**（给拉不起子进程的客户端，如 DSH 的 streamable-http 连接）：
+
+```text
+bili-transcriber-cli --mcp-http        # 端点 http://127.0.0.1:8765/mcp,端口占用自动后移
+```
+
+只绑本机回环、校验 Origin、可选 Bearer token；与 stdio 完全同一套工具。
+
+MCP 服务被设置页关掉时的表现：stdio 与 HTTP 都不启动，原因写 stderr —— 客户端会显示「服务启动失败」，把这行 stderr 贴出来就能定位。
 
 服务端还做了两件兼容：`resources/list` / `prompts/list` 回空清单（而不是 `-32601`），避免个别客户端把整个服务标成不可用；所有非协议输出（含第三方库的 print）都被改道 stderr，不会污染 JSON-RPC 通道。
 

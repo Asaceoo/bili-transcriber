@@ -1,7 +1,7 @@
 # bili-transcriber — Technical Manual (English)
 
 > For developers and maintainers. Covers layering, the concurrency model, the state machine, module responsibilities, data contracts, security boundaries, packaging pitfalls, and the test suite.
-> 发布版本快照 **v0.1.41** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
+> 发布版本快照 **v0.1.44** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ---
 
@@ -114,7 +114,7 @@ Input: a link (Bilibili/Douyin/Xiaohongshu/Kuaishou/YouTube) or a local media fi
 
 ```
 bili-transcriber/
-├── app/                        # 28 modules, ~6700 lines
+├── app/                        # 31 modules, ~9700 lines
 │   ├── __init__.py             # APP_VERSION + frozen-mode DLL search path
 │   ├── paths.py                # Runtime path resolution (GUI/CLI/MCP share one data/)
 │   ├── main.py                 # Entry: single instance / port / tray / UI wiring
@@ -123,6 +123,7 @@ bili-transcriber/
 │   ├── cli.py                  # CLI driver
 │   ├── mcp_server.py           # MCP stdio server (JSON-RPC 2.0 subset)
 │   ├── downloader.py           # Download orchestration: platform / short links / cookies
+│   ├── netcheck.py             # Network & cookie detection (browsers / proxies / config test)
 │   ├── kuaishou.py             # Kuaishou share-page SSR parser
 │   ├── converter.py            # FFmpeg → 16 kHz mono WAV
 │   ├── transcriber.py          # Engine 1: faster-whisper
@@ -153,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (25 files / 397 cases)
+├── tests/                      # pytest (29 files / 525 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -483,7 +484,33 @@ serve(server, sys.stdin, proto)
 - **Reachability cache**: `_reach_cache` is invalidated when the proxy changes.
 - **WeChat Channels are rejected intentionally** — no login-free direct stream exists; the UI is told to use local upload instead of attempting a doomed download.
 
-### 7.8 Three engines
+### 7.8 `netcheck.py` — network and cookie auto-detection
+
+Backend for the Settings page's "Detect" and "Test connection" buttons. **Read-only**: it never writes
+settings (the UI decides what to fill) and degrades every failure into a readable message.
+
+| Capability | Entry point | Notes |
+|---|---|---|
+| Browser scan | `detect_browsers()` | Enumerates Chromium-family and Firefox profiles under `LOCALAPPDATA`/`APPDATA`; reads only `(host_key, name, expires_utc)` metadata — **never decrypts cookie values** |
+| cookies.txt scan | `detect_cookie_files()` | Looks for `*cookie*.txt` in project dir / `data/` / Downloads / Desktop / Documents |
+| Proxy discovery | `detect_proxies()` | System proxy (registry) → env vars → common local ports (7890/7897/10809…), each verified against YouTube |
+| Network probe | `probe_network()` | Five platforms probed in parallel, hard deadline caps total time |
+| Recommendation | `build_report()` | Picks the source with most platform coverage; ties go to cookies.txt; keeps current values when nothing is found |
+| Config test | `test_configuration()` | Real network + real cookie values; Bilibili checked via `x/web-interface/nav` (`isLogin`/`uname`) |
+| Export | `export_browser_cookies()` | Decrypts via yt-dlp and writes a Netscape file (contains credentials; only on explicit click) |
+
+**Why detection does not decrypt**: "is platform X logged in?" only needs domain/name/expiry.
+Metadata is cheap and needs no DPAPI work; only "Test" and "Export" need values.
+
+**Chromium lock limitation**: while the browser runs it holds an exclusive lock on `Cookies`;
+`shutil.copy2` fails with `WinError 32`. `BrowserInfo.running` is then `True` and the UI says
+"close the browser and re-detect, or use cookies.txt" — a known limitation, not a crash.
+
+**Two traps worth remembering**: (1) `urllib`'s default opener honours env proxies, so direct probes must pass
+`ProxyHandler({})`; (2) socket timeouts apply per-address, so probes use `future.result(timeout=…)` as a hard
+deadline, with a 2 s DNS cap that is skipped whenever a proxy is in use.
+
+### 7.9 Three engines
 
 | Module | Backend | Timestamp strategy | Language mapping |
 |---|---|---|---|
@@ -497,7 +524,7 @@ Shared behavior:
 - **VAD self-healing**: when Silero VAD filters out all speech (music), retry once with VAD disabled.
 - **Qwen chunking**: long audio split into 60 s chunks with `on_event` reporting "chunk i/n".
 
-### 7.9 `writers.py` — output writing
+### 7.10 `writers.py` — output writing
 
 ```python
 def _write_text_retry(path, text, attempts=6):
@@ -514,7 +541,7 @@ def _write_text_retry(path, text, attempts=6):
 
 Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real problems solved: antivirus briefly locking the directory, and the user having the file open elsewhere. **You never get a truncated file.**
 
-### 7.10 `models.py` / `gpu_runtime.py`
+### 7.11 `models.py` / `gpu_runtime.py`
 
 - `default_model_dir()` → `%LOCALAPPDATA%\Bili Note\models`; `resolve_model_dir()` honors a custom path.
 - `scan_models()` / `describe_models()` validate completeness per engine's characteristic files, driving the "Check models" button.
@@ -524,7 +551,7 @@ Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real pr
   - **Idempotent registration**: `_registered_dirs` stops every transcription from re-prepending PATH and growing it without bound.
 - `ensure_gpu_or_cpu()` falls back to CPU silently when the pack is absent, and pre-validates `ctypes.WinDLL("cublas64_12.dll")` so failures surface at detection time, not mid-transcription.
 
-### 7.11 `keyframes.py` — dual backend
+### 7.12 `keyframes.py` — dual backend
 
 | Backend | Detection | When |
 |---|---|---|
@@ -533,13 +560,44 @@ Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real pr
 
 Shared policy: always capture the first frame; capture 0.4 s after a cut; minimum 5 s interval; cap at 400 frames. `KeyframeError` and user cancellation propagate instead of falling back.
 
-### 7.12 The `ui/` trio
+### 7.13 The `ui/` trio
 
 - `state.py` — creates singletons at first module import (store / settings / pipeline / events), matching pre-split `main.py` behavior.
 - `pages.py` — four-tab layout.
 - `helpers.py` — pure action functions, no layout; UI-level names like `_launch_explorer` are monkeypatchable in tests.
 
 **Table row event gotcha**: after NiceGUI `$emit('open-path', path)`, `e.args` is a list `[path]` and must be unwrapped by `_first_arg(e)`. The explorer call `/select,"path"` needs quotes or paths with spaces get truncated.
+
+### 7.14 `mcp_http.py` — MCP Streamable HTTP transport
+
+For callers that **cannot spawn child processes**: DSH streamable-http connections, containers, in-browser agents. Protocol handling is fully shared with `MCPServer.handle`, so stdio and HTTP expose identical tools and error semantics.
+
+| Capability | Detail |
+|---|---|
+| Routes | `POST /mcp` (JSON or SSE per Accept), `GET /mcp` always 405 (no server-push stream), `DELETE /mcp` 204 ends session, `GET /healthz` liveness |
+| Sessions | created on `initialize` (`Mcp-Session-Id`), 30-min idle TTL, cap 64 (oldest evicted); business state lives in Service/DB so eviction is side-effect-free |
+| Security defaults | binds `127.0.0.1` only; Origin allowlist (non-local 403, anti DNS-rebinding); zero CORS by default; optional Bearer token (`BILI_MCP_HTTP_TOKEN`) |
+| Request guards | missing Content-Length → 400 (no chunked), 8 MB body cap, bad JSON `-32700`, unknown session → 404 asking to re-initialize |
+
+**Two gotchas caught by real tool-closure tests:**
+
+1. **`start()` must spawn its own thread running `serve_forever()`** — the stdlib constructor alone never accepts connections; clients see "requests hang while the server listens".
+2. **`server_bind` calls `socket.getfqdn()` by default** — on machines whose DNS is hijacked by proxies this reverse lookup stalls startup for tens of seconds. `_QuietHTTPServer` overrides it with the literal IP.
+
+Also: the HTTP server is threaded while the Service's SQLite connection is not concurrency-safe → `_handle_lock` serializes tool calls (matching stdio's natural serialization).
+
+### 7.15 `agent_setup.py` — per-client AI onboarding config generator
+
+One MCP server, eight clients, eight config formats — this module freezes the known shapes:
+
+| Client | Format | Delivery |
+|---|---|---|
+| WorkBuddy | JSON `mcpServers` | `--write` to `~/.workbuddy/mcp.json` |
+| DSH | `tables.connections` entry | **direct write refused** (the table is UI-managed); a paste-ready streamable-http / stdio entry is generated instead |
+| Codex | TOML `[mcp_servers.*]` | `--write`; only documented keys (`startup_timeout_sec=300`) — **an invented unknown key breaks the whole config.toml** |
+| Claude / Cursor / VS Code / Tare / generic | JSON | `--write` or manual paste |
+
+Design rule: **generate, never silently mutate user config**. Writes require explicit `--write`, back up to `.bak`, and touch only the `bili-transcriber` entry; `merge_toml` replaces by section boundaries, leaving the user's provider/model config intact. `resolve_executable` distinguishes frozen (`xxx.exe --mcp`) from source (`python -m app.mcp_server`). `doctor()` aggregates local client detection and common pitfalls; paths always go through `app.paths.data_dir()` (hardcoding either flavor's path misreports on the other).
 
 ---
 
@@ -699,17 +757,20 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **25 files / 397 cases**, green in 1–3 minutes.
+`tests/` holds **29 files / 525 cases**, green in about 2 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|
 | Storage | `test_store.py` | Real SQLite temp databases |
 | Download | `test_downloader.py` / `test_kuaishou.py` | Mocked yt-dlp / SSR HTML fixtures |
+| Network & cookies | `test_netcheck.py` / `test_native_dialog.py` | Temporary SQLite cookie DBs, probes mocked, no network |
 | Engines | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel injection; **concurrent `load()` regression** (`Barrier(2)` asserts a single load) |
 | Orchestration | `test_pipeline.py` | FakeDownloader / FakeTranscriber at the boundary; covers "no re-enqueue for active tasks", leftover recovery, mid-run kill recovery |
-| Service layer | `test_headless.py` | `running` semantics / stalled detection / prewarm / four settings validations / status aliases |
-| CLI | `test_cli.py` | Argument parsing, JSON output, **GBK stdout regression**, non-integer `--set` |
-| MCP | `test_mcp_server.py` | Handshake, nine tools, bad-arg tolerance, **batch flattening**, **NaN sanitizing** |
+| Service layer | `test_headless.py` | `running` semantics / stalled detection / prewarm / four settings validations / status aliases / **search full-text retrieval** |
+| CLI | `test_cli.py` | Argument parsing, JSON output, **GBK stdout regression**, non-integer `--set`, **--grep/--doctor/--agent-config/--mcp-http gating** |
+| MCP | `test_mcp_server.py` | Handshake, **11 tools**, bad-arg tolerance, **batch flattening**, **NaN sanitizing**, timeout clamping |
+| MCP HTTP | `test_mcp_http.py` | Session TTL/eviction, Origin allowlist, Bearer token, ten route states, **real-socket end-to-end** |
+| Onboarding config | `test_agent_setup.py` | 8-client rendering, JSON/TOML merge preserving foreign entries, DSH write refusal, **no invented TOML keys** |
 | Writers | `test_writers.py` | Atomic write retries, no truncated files |
 | UI | `test_ui.py` / `test_main_helpers.py` | NiceGUI `user_plugin`; `_first_arg` / explorer quoting |
 | Release | `test_release_docs.py` | Automatic manual version-header sync |
@@ -726,6 +787,15 @@ This project uses three-perspective iterative review:
 | **AI consumer** | Are args easy to pass? Are errors readable? Is state decidable? | `running` semantics, stalled hints, `_arg_int` coercion |
 
 The rule: **reproduce a real failure before fixing anything.** Every fix above corresponds to an actual failing run, not a "looks suspicious" hunch.
+
+After the v0.1.43 release, three further review rounds with rotating attack surfaces
+(HTTP transport / config merging / service-layer search & settings) converged a total
+of **10 real bugs + 5 hardening items**, including: TOML merging breaking the whole
+Codex config.toml on trailing comments (proven via tomllib), `search` case-insensitivity
+completely inert (inconsistent comparison baselines), the real `--mcp-http` path crashing
+on a missing `import sys` despite 517 green tests, unauthenticated HTTP `DELETE`, and a
+raw traceback on JSONC configs — full record in
+[`docs/adversarial-review.md`](adversarial-review.md).
 
 ### 12.2 Running
 

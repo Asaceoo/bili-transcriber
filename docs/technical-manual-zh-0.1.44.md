@@ -1,7 +1,7 @@
 # bili-transcriber 技术手册（中文）
 
 > 面向开发者与维护者。讲清架构分层、并发模型、状态机、模块职责、数据契约、安全边界、打包坑位与测试体系。
-> 发布版本快照 **v0.1.42** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
+> 发布版本快照 **v0.1.44** — 由 `scripts/release.py` 自动生成,版本号取自 `pyproject.toml` 单一来源。
 
 ---
 
@@ -113,7 +113,7 @@ bili-transcriber 是一个**纯本地的多平台视频 / 音频转写工具**�
 
 ```
 bili-transcriber/
-├── app/                        # 应用源码（29 个模块，约 8600 行）
+├── app/                        # 应用源码（31 个模块，约 9700 行）
 │   ├── __init__.py             # APP_VERSION + frozen 模式 DLL 搜索路径
 │   ├── paths.py                # 运行时路径解析（GUI/CLI/MCP 共用同一份 data/）
 │   ├── main.py                 # 启动入口：单实例 / 端口 / 托盘 / UI 装配
@@ -153,7 +153,7 @@ bili-transcriber/
 │   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
 │   ├── e2e_check.py            # 端到端链路检查
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（27 文件 / 447 用例）
+├── tests/                      # pytest（29 文件 / 525 用例）
 ├── docs/                       # 双语手册 + assets/ 概念图
 ├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
 ├── output/                     # 转写产物（运行时）
@@ -571,6 +571,37 @@ def _write_text_retry(path, text, attempts=6):
 
 **表格行级事件的坑**：NiceGUI `$emit('open-path', path)` 后 `e.args` 是 `[path]` 列表，需 `_first_arg(e)` 解包。explorer 的 `/select,"path"` 必须用引号包裹，否则含空格的路径被截断。
 
+### 7.14 `mcp_http.py` — MCP Streamable HTTP 传输
+
+给**拉不起子进程**的调用方用：DSH 的 streamable-http 连接、容器、浏览器内 Agent。协议处理完全复用 `MCPServer.handle`，stdio 与 HTTP 两条通道工具与错误语义一致。
+
+| 能力 | 说明 |
+|---|---|
+| 路由 | `POST /mcp`（JSON 或 SSE 看 Accept）、`GET /mcp` 恒 405（不提供服务端推送）、`DELETE /mcp` 204 结束会话、`GET /healthz` 探活 |
+| 会话 | `initialize` 时建（`Mcp-Session-Id`），闲置 30 分钟回收、上限 64 个（满了淘汰最旧）；业务状态在 Service/DB，回收无副作用 |
+| 安全默认 | 只绑 `127.0.0.1`；Origin 白名单（非本机 403，防 DNS rebinding）；默认零 CORS；可选 Bearer token（`BILI_MCP_HTTP_TOKEN`） |
+| 请求护栏 | 无 Content-Length 报 400（不支持 chunked）；8 MB 体积上限；坏 JSON `-32700`；未知会话 404 提示重新 initialize |
+
+**两个必须记住的坑（工具闭环实测抓出）：**
+
+1. **`start()` 必须自己起线程跑 `serve_forever()`** —— 标准库只构造 server 对象，没人 accept，客户端表现为"请求挂死但服务明明在监听"。
+2. **`server_bind` 默认调 `socket.getfqdn()` 反向解析** —— DNS 被代理接管的机器上服务启动即挂几十秒。`_QuietHTTPServer` 覆盖之，`server_name` 用字面 IP。
+
+另外：CLI 是多线程服务器，而 Service 的 SQLite 连接非并发安全 → `_handle_lock` 把工具调用串行化（与 stdio 天然串行语义一致）。
+
+### 7.15 `agent_setup.py` — 各 AI 客户端接入配置生成
+
+同一个 MCP 服务，八种客户端的配置格式各不相同 —— 这层把已知格式固化：
+
+| 客户端 | 格式 | 落地方式 |
+|---|---|---|
+| WorkBuddy | JSON `mcpServers` | `--write` 直写 `~/.workbuddy/mcp.json` |
+| DSH | `tables.connections` 条目 | **拒绝直写**（连接表由界面托管，直写会破坏结构）；生成可粘贴的 streamable-http / stdio 条目 |
+| Codex | TOML `[mcp_servers.*]` | `--write` 直写；只写文档化键（`startup_timeout_sec=300`），**想当然的未知键会让整个 config.toml 起不来** |
+| Claude / Cursor / VS Code / Tare / generic | JSON | `--write` 或手动粘贴 |
+
+设计原则：**只生成、不擅自改用户配置**。写入必须显式 `--write`、先备份 `.bak`、只动 `bili-transcriber` 条目；`merge_toml` 按 section 边界替换，用户的 provider/model 等配置原样保留。`resolve_executable` 区分冻结态（`xxx.exe --mcp`）与源码态（`python -m app.mcp_server`）。`doctor()` 聚合本机客户端探测与常见错误，路径一律走 `app.paths.data_dir()`（写死任一形态的路径都会在另一种形态下误报）。
+
 ---
 
 ## 8. 数据契约
@@ -729,7 +760,7 @@ python scripts/release.py --single-only# 仅重建单文件版
 
 ## 12. 测试体系
 
-`tests/` 共 **24 个文件 / 372 用例**，全绿约 1~3 分钟。
+`tests/` 共 **29 个文件 / 525 用例**，全绿约 2 分钟。
 
 | 领域 | 文件 | 策略 |
 |---|---|---|
@@ -738,9 +769,11 @@ python scripts/release.py --single-only# 仅重建单文件版
 | 网络与 Cookie | `test_netcheck.py` / `test_native_dialog.py` | 临时 SQLite 造 Cookie 库、探测函数全 mock,不联网 |
 | 三引擎 | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel 注入；**并发 load() 回归**（`Barrier(2)` 断言只加载一次） |
 | 编排 | `test_pipeline.py` | FakeDownloader / FakeTranscriber mock 外部边界；含「重复提交不重排」「遗留任务恢复」「半路被杀恢复」 |
-| 服务层 | `test_headless.py` | running 语义 / stalled 检测 / prewarm / 4 项设置校验 / 状态别名 |
-| CLI | `test_cli.py` | 参数解析、JSON 输出、**GBK stdout 回归**、非整数 `--set` |
-| MCP | `test_mcp_server.py` | 协议握手、9 工具、非法参数容错、**批量展平**、**NaN 清洗** |
+| 服务层 | `test_headless.py` | running 语义 / stalled 检测 / prewarm / 4 项设置校验 / 状态别名 / **search 全文检索** |
+| CLI | `test_cli.py` | 参数解析、JSON 输出、**GBK stdout 回归**、非整数 `--set`、**--grep/--doctor/--agent-config/--mcp-http 门禁** |
+| MCP | `test_mcp_server.py` | 协议握手、**11 工具**、非法参数容错、**批量展平**、**NaN 清洗**、超时夹紧 |
+| MCP HTTP | `test_mcp_http.py` | 会话表 TTL/淘汰、Origin 白名单、Bearer token、路由十态、**真实 socket 端到端** |
+| 接入配置 | `test_agent_setup.py` | 8 客户端渲染、JSON/TOML 合并保留他项、DSH 拒写、**禁止发明 TOML 键** |
 | 落盘 | `test_writers.py` | 原子写重试、无半截文件 |
 | UI | `test_ui.py` / `test_main_helpers.py` | NiceGUI `user_plugin`；`_first_arg` / explorer 引号单测 |
 | 发布 | `test_release_docs.py` | 文档版本头部自动同步 |
@@ -757,6 +790,13 @@ python scripts/release.py --single-only# 仅重建单文件版
 | **AI 使用方** | 参数是否好传、错误是否可读、状态是否可判 | `running` 语义、stalled 提示、`_arg_int` 容错 |
 
 原则：**先拿到真实报错再改**。上面每一条修复都对应一次实际运行的失败输出，而不是"看起来可能有问题"。
+
+v0.1.43 发布后连续三轮换攻击面复审（HTTP 传输 / 配置合并 / 服务层检索与设置），
+累计收敛 **10 个真 bug + 5 项加固**，包括：TOML 合并遇行尾注释会让 Codex
+config.toml 全崩（tomllib 实证）、`search` 大小写不敏感完全失效（双重检查基准
+不一致）、`--mcp-http` 真实路径缺 `import sys`（517 项测试全绿仍漏网）、
+HTTP `DELETE` 无鉴权、JSONC 配置裸 traceback 等 —— 全记录见
+[`docs/adversarial-review.md`](adversarial-review.md)。
 
 ### 12.2 运行
 
