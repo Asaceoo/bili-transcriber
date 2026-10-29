@@ -115,7 +115,7 @@ Input: a link (Bilibili/Douyin/Xiaohongshu/Kuaishou/YouTube) or a local media fi
 
 ```
 bili-transcriber/
-├── app/                        # 28 modules, ~6700 lines
+├── app/                        # 29 modules, ~8600 lines
 │   ├── __init__.py             # APP_VERSION + frozen-mode DLL search path
 │   ├── paths.py                # Runtime path resolution (GUI/CLI/MCP share one data/)
 │   ├── main.py                 # Entry: single instance / port / tray / UI wiring
@@ -124,6 +124,7 @@ bili-transcriber/
 │   ├── cli.py                  # CLI driver
 │   ├── mcp_server.py           # MCP stdio server (JSON-RPC 2.0 subset)
 │   ├── downloader.py           # Download orchestration: platform / short links / cookies
+│   ├── netcheck.py             # Network & cookie detection (browsers / proxies / config test)
 │   ├── kuaishou.py             # Kuaishou share-page SSR parser
 │   ├── converter.py            # FFmpeg → 16 kHz mono WAV
 │   ├── transcriber.py          # Engine 1: faster-whisper
@@ -154,7 +155,7 @@ bili-transcriber/
 │   ├── release.py              # One-shot release: bump + five artifacts + doc snapshots
 │   ├── e2e_check.py            # End-to-end link check
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # Sandbox-safe deletion helpers
-├── tests/                      # pytest (25 files / 397 cases)
+├── tests/                      # pytest (27 files / 447 cases)
 ├── docs/                       # Bilingual manuals + assets/ concept art
 ├── data/                       # settings.json + history.db (runtime; logs live in %LOCALAPPDATA%\Bili Note\logs)
 ├── output/                     # Transcription output (runtime)
@@ -484,7 +485,33 @@ serve(server, sys.stdin, proto)
 - **Reachability cache**: `_reach_cache` is invalidated when the proxy changes.
 - **WeChat Channels are rejected intentionally** — no login-free direct stream exists; the UI is told to use local upload instead of attempting a doomed download.
 
-### 7.8 Three engines
+### 7.8 `netcheck.py` — network and cookie auto-detection
+
+Backend for the Settings page's "Detect" and "Test connection" buttons. **Read-only**: it never writes
+settings (the UI decides what to fill) and degrades every failure into a readable message.
+
+| Capability | Entry point | Notes |
+|---|---|---|
+| Browser scan | `detect_browsers()` | Enumerates Chromium-family and Firefox profiles under `LOCALAPPDATA`/`APPDATA`; reads only `(host_key, name, expires_utc)` metadata — **never decrypts cookie values** |
+| cookies.txt scan | `detect_cookie_files()` | Looks for `*cookie*.txt` in project dir / `data/` / Downloads / Desktop / Documents |
+| Proxy discovery | `detect_proxies()` | System proxy (registry) → env vars → common local ports (7890/7897/10809…), each verified against YouTube |
+| Network probe | `probe_network()` | Five platforms probed in parallel, hard deadline caps total time |
+| Recommendation | `build_report()` | Picks the source with most platform coverage; ties go to cookies.txt; keeps current values when nothing is found |
+| Config test | `test_configuration()` | Real network + real cookie values; Bilibili checked via `x/web-interface/nav` (`isLogin`/`uname`) |
+| Export | `export_browser_cookies()` | Decrypts via yt-dlp and writes a Netscape file (contains credentials; only on explicit click) |
+
+**Why detection does not decrypt**: "is platform X logged in?" only needs domain/name/expiry.
+Metadata is cheap and needs no DPAPI work; only "Test" and "Export" need values.
+
+**Chromium lock limitation**: while the browser runs it holds an exclusive lock on `Cookies`;
+`shutil.copy2` fails with `WinError 32`. `BrowserInfo.running` is then `True` and the UI says
+"close the browser and re-detect, or use cookies.txt" — a known limitation, not a crash.
+
+**Two traps worth remembering**: (1) `urllib`'s default opener honours env proxies, so direct probes must pass
+`ProxyHandler({})`; (2) socket timeouts apply per-address, so probes use `future.result(timeout=…)` as a hard
+deadline, with a 2 s DNS cap that is skipped whenever a proxy is in use.
+
+### 7.9 Three engines
 
 | Module | Backend | Timestamp strategy | Language mapping |
 |---|---|---|---|
@@ -498,7 +525,7 @@ Shared behavior:
 - **VAD self-healing**: when Silero VAD filters out all speech (music), retry once with VAD disabled.
 - **Qwen chunking**: long audio split into 60 s chunks with `on_event` reporting "chunk i/n".
 
-### 7.9 `writers.py` — output writing
+### 7.10 `writers.py` — output writing
 
 ```python
 def _write_text_retry(path, text, attempts=6):
@@ -515,7 +542,7 @@ def _write_text_retry(path, text, attempts=6):
 
 Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real problems solved: antivirus briefly locking the directory, and the user having the file open elsewhere. **You never get a truncated file.**
 
-### 7.10 `models.py` / `gpu_runtime.py`
+### 7.11 `models.py` / `gpu_runtime.py`
 
 - `default_model_dir()` → `%LOCALAPPDATA%\Bili Note\models`; `resolve_model_dir()` honors a custom path.
 - `scan_models()` / `describe_models()` validate completeness per engine's characteristic files, driving the "Check models" button.
@@ -525,7 +552,7 @@ Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real pr
   - **Idempotent registration**: `_registered_dirs` stops every transcription from re-prepending PATH and growing it without bound.
 - `ensure_gpu_or_cpu()` falls back to CPU silently when the pack is absent, and pre-validates `ctypes.WinDLL("cublas64_12.dll")` so failures surface at detection time, not mid-transcription.
 
-### 7.11 `keyframes.py` — dual backend
+### 7.12 `keyframes.py` — dual backend
 
 | Backend | Detection | When |
 |---|---|---|
@@ -534,7 +561,7 @@ Write `.tmp`, then `os.replace`, with six `PermissionError` retries. Two real pr
 
 Shared policy: always capture the first frame; capture 0.4 s after a cut; minimum 5 s interval; cap at 400 frames. `KeyframeError` and user cancellation propagate instead of falling back.
 
-### 7.12 The `ui/` trio
+### 7.13 The `ui/` trio
 
 - `state.py` — creates singletons at first module import (store / settings / pipeline / events), matching pre-split `main.py` behavior.
 - `pages.py` — four-tab layout.
@@ -700,12 +727,13 @@ python scripts/release.py --single-only # rebuild the single-file build only
 
 ## 12. Test Suite
 
-`tests/` holds **25 files / 397 cases**, green in 1–3 minutes.
+`tests/` holds **27 files / 447 cases**, green in 3–5 minutes.
 
 | Area | Files | Strategy |
 |---|---|---|
 | Storage | `test_store.py` | Real SQLite temp databases |
 | Download | `test_downloader.py` / `test_kuaishou.py` | Mocked yt-dlp / SSR HTML fixtures |
+| Network & cookies | `test_netcheck.py` / `test_native_dialog.py` | Temporary SQLite cookie DBs, probes mocked, no network |
 | Engines | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel injection; **concurrent `load()` regression** (`Barrier(2)` asserts a single load) |
 | Orchestration | `test_pipeline.py` | FakeDownloader / FakeTranscriber at the boundary; covers "no re-enqueue for active tasks", leftover recovery, mid-run kill recovery |
 | Service layer | `test_headless.py` | `running` semantics / stalled detection / prewarm / four settings validations / status aliases |

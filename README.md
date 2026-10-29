@@ -10,7 +10,7 @@
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
 [![MCP](https://img.shields.io/badge/MCP-stdio-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-397%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-447%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
 
 </div>
@@ -86,6 +86,7 @@
 - **系统托盘** — 托盘图标可唤回窗口或退出。
 - **单实例保护** — 重复启动只会把已有窗口提到前台，不会抢同一个任务、也不会闪退。
 - **CLI + MCP 双通道** — 命令行与 AI 软件都能调；两个通道各有开关，设置页一键关闭。
+- **网络与 Cookie 一键检测** — 自动扫出浏览器登录态、cookies.txt 和本机代理并填好设置，点「测试连接」当场验证能不能用。
 - **纯本地** — 转写过程不调用任何外部 AI API。
 
 ---
@@ -181,9 +182,9 @@ python -m venv .venv
 | VAD | 开 / 关 | 纯音乐场景会自动关闭重试 |
 | 图文讲义 | 开 / 关 | B 站任务改下视频流，体积明显变大 |
 | 模型目录 | 路径 | 默认 `%LOCALAPPDATA%\Bili Note\models` |
-| 浏览器 Cookie | 不使用 / Chrome / Edge / Firefox / Brave / Opera / Vivaldi | 抖音精选、部分 YouTube 需要 |
-| cookies.txt | 文件路径 | **优先于**浏览器 Cookie |
-| 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要 |
+| 浏览器 Cookie | 不使用 / Chrome / Edge / Firefox / Brave / Chromium / Opera / Vivaldi | 抖音精选、部分 YouTube 需要；可一键检测自动选 |
+| cookies.txt | 文件路径 | **优先于**浏览器 Cookie；不受浏览器开关影响 |
+| 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要；可点「探测」自动找 |
 | 输出目录 | 路径 | 默认 `output/` |
 | 并发数 | 整数 | 下载/转码并发，转写始终串行 |
 | 允许 CLI 调用 | 开 / 关 | 关掉后 `--cli` 直接拒绝（退出码 3） |
@@ -463,7 +464,8 @@ bili-transcriber.exe --version
 平台接口常变，先升级下载器：`pip install -U yt-dlp`。
 
 **Q2 抖音 / YouTube 提示需要登录？**
-配「浏览器 Cookie」（先在对应浏览器登录），或导出 `cookies.txt` 填路径。YouTube 另需代理。
+设置页点「一键检测本机网络与 Cookie」，它会扫出你浏览器里的登录态和本机代理并自动填好；
+再点「② 测试连接」确认可用，最后保存。YouTube 另需代理（同一按钮会自动探测可用端口）。
 
 **Q3 转写很慢？**
 确认设备 `auto`/`cuda` 且装了 GPU 包；首次要下 1.6 GB 模型；Qwen 1.7B 在 CPU 上是 0.6B 的 3 倍耗时。
@@ -523,7 +525,7 @@ VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实�
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 397 passed
+.venv\Scripts\pytest -q                    # 当前 447 passed
 .venv\Scripts\python -m app.main           # 开发运行
 ```
 

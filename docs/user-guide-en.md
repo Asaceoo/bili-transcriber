@@ -322,21 +322,74 @@ Switching engines **swaps the model dropdown** to that engine's list, so combina
 | Model directory | Defaults to `%LOCALAPPDATA%\Bili Note\models`; point elsewhere or drop manually downloaded model packs here |
 | Workers | Download/convert threads, 1–6, default 2 |
 
-### 7.3 Network and Login
+### 7.3 Network and Login (one-click detection)
+
+This section has three inputs and a three-step flow. **The recommended path is one sentence:
+click "Detect network & cookies" → let it fill things in → click "② Test connection" → click "③ Save settings".**
 
 | Setting | Description |
 |---|---|
-| Browser cookies | Choose Chrome / Edge / Firefox / Brave / Opera / Vivaldi. The app reads cookies from that browser's logged-in profile. **Log in to the target site in that browser first** |
-| cookies.txt | Path to a Netscape-format cookie file. **Takes precedence over browser cookies** |
-| Proxy | e.g. `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. Needed for YouTube and similar |
+| Browser cookies | Chrome / Edge / Firefox / Brave / Chromium / Opera / Vivaldi. The app reads cookies from that browser's logged-in profile. **Log in to the target site in that browser first** |
+| cookies.txt | Path to a Netscape-format cookie file. **Takes precedence over browser cookies** and is unaffected by whether the browser is open |
+| Proxy | e.g. `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. Needed for YouTube. The "Probe" button finds it automatically |
 
-When cookies matter:
+#### What detection does
 
-- Douyin "Featured" content (regular videos usually work without)
-- Some YouTube videos (age or membership gated)
-- Bilibili high-bitrate or premium content
+One click (3–5 seconds) runs three things in parallel:
 
-Getting a cookies.txt: install a cookie-export extension, export in Netscape format, save it locally, then paste the path into Settings.
+1. **Browser scan** — enumerates installed Chrome / Edge / Brave / Vivaldi / Chromium / Opera / Firefox and
+   reports which platforms (Bilibili, Douyin, Xiaohongshu, Kuaishou, YouTube) you are logged in to.
+   It reads only cookie **domain, name and expiry** — never the value.
+2. **cookies.txt search** — app directory, `data/`, Downloads, Desktop, Documents.
+3. **Network probe** — per-platform latency plus system proxy / env-var proxy / common local ports
+   (7890, 7897, 10809, 1080…), each verified against YouTube.
+
+It then picks the source with the widest coverage and **fills the three inputs for you**, explaining why:
+
+```
+Platforms   ✅ Bilibili  ✅ Douyin  ⚪ Xiaohongshu  ⚪ Kuaishou  ⚪ YouTube
+Network     ✅ Bilibili 383ms  ✅ Douyin 277ms  …  ❌ YouTube direct blocked
+Proxy       ✅ http://127.0.0.1:7897 works
+· Chrome/Edge are running, so their cookie DB is locked: close them and re-detect, or use cookies.txt
+```
+
+> **Auto-fill has boundaries**: it only overwrites when it finds a strictly better source and never
+> clears a working configuration. If nothing is detected it keeps your values and says why.
+
+#### Detection vs. Test connection
+
+| | Detect | ② Test connection |
+|---|---|---|
+| Network | Probes reachability | Probes again, **through the proxy you configured** |
+| Cookies | Metadata only (name/expiry) | Real cookie values |
+| Answers | "What should I fill in?" | "Does this configuration work now?" |
+| Output | Three auto-filled values | One row per platform: latency + login state + detail |
+
+For Bilibili the test calls the official `nav` endpoint and **shows your account name**; Douyin /
+Xiaohongshu / Kuaishou require request signing, so they are reported as "logged in" (cookie present)
+rather than "verified".
+
+#### When cookies or a proxy are actually needed
+
+| Platform | Cookie? | Proxy? | Notes |
+|---|---|---|---|
+| Bilibili | Mostly no | No | 1080P+ / premium / some series need login |
+| Douyin | **Recommended** | No | Anonymous requests are often rate-limited |
+| Xiaohongshu | **Recommended** | No | Full video URLs require login |
+| Kuaishou | Rarely | No | Share-page parsing, no login |
+| YouTube | Sometimes | **Required** | Age/member-gated videos; blocked in mainland China |
+
+#### Choosing between the three sources
+
+1. **Browser cookies (easiest)** — reads the login state of your browser. Downside: while the browser
+   **is running**, its cookie DB is exclusively locked, so detection fails and cookie-dependent downloads fail too.
+2. **cookies.txt (most stable)** — takes precedence and is immune to the lock. Expand
+   "Three cookie sources" in Settings and use "Export cookies.txt from browser" (close the browser first);
+   it writes `data/cookies.txt` and fills the path for you.
+3. **Neither** — public content only; enough for ordinary Bilibili videos.
+
+> The exported cookies.txt contains login credentials and lives only in the local `data/` directory.
+> Do not share it or commit it.
 
 ### 7.4 Model Management
 

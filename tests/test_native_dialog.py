@@ -32,3 +32,36 @@ def test_media_filter_double_null_terminated():
     assert body[0] == "视频/音频文件"
     assert "*.mp4" in body[1] and "*.flac" in body[1]
     assert body[-1] == "*.*"
+
+
+def test_cookie_filter_is_paired():
+    """选 cookies.txt 用的过滤器同样是 描述\\0通配 成对,且只挑 txt。"""
+    body = [p for p in native_dialog.COOKIE_FILTER.split("\0") if p]
+    assert len(body) % 2 == 0
+    assert body[0].startswith("Cookie")
+    assert body[1] == "*.txt"
+
+
+def test_pick_file_returns_none_when_cancelled(monkeypatch):
+    monkeypatch.setattr(native_dialog, "_open_dialog", lambda *a, **k: [])
+    assert native_dialog.pick_file() is None
+
+
+def test_pick_file_returns_first_selection(monkeypatch):
+    monkeypatch.setattr(native_dialog, "_open_dialog",
+                        lambda *a, **k: [Path("C:/tmp/cookies.txt")])
+    assert native_dialog.pick_file("选文件", native_dialog.COOKIE_FILTER) == \
+        Path("C:/tmp/cookies.txt")
+
+
+def test_pick_files_keeps_multiselect(monkeypatch):
+    seen = {}
+
+    def fake(title, file_filter, multiple):
+        seen.update(title=title, file_filter=file_filter, multiple=multiple)
+        return [Path("a.mp4"), Path("b.mp3")]
+
+    monkeypatch.setattr(native_dialog, "_open_dialog", fake)
+    assert native_dialog.pick_files() == [Path("a.mp4"), Path("b.mp3")]
+    assert seen["multiple"] is True
+    assert seen["file_filter"] == native_dialog.MEDIA_FILTER

@@ -114,7 +114,7 @@ bili-transcriber 是一个**纯本地的多平台视频 / 音频转写工具**�
 
 ```
 bili-transcriber/
-├── app/                        # 应用源码（28 个模块，约 6700 行）
+├── app/                        # 应用源码（29 个模块，约 8600 行）
 │   ├── __init__.py             # APP_VERSION + frozen 模式 DLL 搜索路径
 │   ├── paths.py                # 运行时路径解析（GUI/CLI/MCP 共用同一份 data/）
 │   ├── main.py                 # 启动入口：单实例 / 端口 / 托盘 / UI 装配
@@ -123,6 +123,7 @@ bili-transcriber/
 │   ├── cli.py                  # 命令行驱动
 │   ├── mcp_server.py           # MCP stdio 服务端（JSON-RPC 2.0 子集）
 │   ├── downloader.py           # 下载编排：平台识别 / 短链 / SSR / Cookie / 代理
+│   ├── netcheck.py             # 网络与 Cookie 自动检测（浏览器扫描 / 代理探测 / 配置测试）
 │   ├── kuaishou.py             # 快手分享页 SSR 解析（免登录提取 mp4 直链）
 │   ├── converter.py            # FFmpeg → 16kHz 单声道 WAV
 │   ├── transcriber.py          # 引擎 1：faster-whisper
@@ -153,7 +154,7 @@ bili-transcriber/
 │   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
 │   ├── e2e_check.py            # 端到端链路检查
 │   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（25 文件 / 397 用例）
+├── tests/                      # pytest（27 文件 / 447 用例）
 ├── docs/                       # 双语手册 + assets/ 概念图
 ├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
 ├── output/                     # 转写产物（运行时）
@@ -483,7 +484,37 @@ serve(server, sys.stdin, proto)
 - **探测缓存**：`_reach_cache` 在代理变更后清空重测。
 - **微信视频号主动拦截**：没有免登录直链，直接给出改用本地上传的提示，而不是让它下载失败。
 
-### 7.8 三转写引擎
+### 7.8 `netcheck.py` — 网络与 Cookie 自动检测
+
+设置页「一键检测」与「测试连接」的后端。**只读本机数据、不改设置**（写回由 UI 层决定），
+所有异常降级成可读文案：某个浏览器库损坏不影响整体结果。
+
+| 能力 | 入口 | 实现要点 |
+|---|---|---|
+| 浏览器扫描 | `detect_browsers()` | 按 `LOCALAPPDATA`/`APPDATA` 枚举 Chromium 系 + Firefox 配置；只读 `(host_key, name, expires_utc)` 元信息，**不解密 Cookie 值** |
+| cookies.txt 扫描 | `detect_cookie_files()` | 项目目录 / `data/` / 下载 / 桌面 / 文档里找名字含 `cookie` 的 `.txt`，解析 Netscape 格式 |
+| 代理探测 | `detect_proxies()` | 系统代理（注册表）→ 环境变量 → 常见本机端口（7890/7897/10809…）TCP 探测，再用 YouTube 验证可用性 |
+| 网络探测 | `probe_network()` | 5 平台并行 HTTPS 探测 + 代理验证，硬截止时间封顶耗时 |
+| 建议 | `build_report()` | 按「覆盖平台数」选源：数量相同优先 cookies.txt；识别不到就保留用户现值，绝不清空 |
+| 配置测试 | `test_configuration()` | 真联网 + 真读 Cookie 值，B 站走 `x/web-interface/nav` 校验 `isLogin`/`uname` |
+| 导出 | `export_browser_cookies()` | 经 yt-dlp 解密并写 Netscape 文件（含凭据，只在用户点按钮时生成） |
+
+**为什么检测阶段不解密 Cookie**：判断"某平台是否登录"只需要 Cookie 的域名、名字、有效期，
+读元信息不碰 DPAPI 解密，快且不需要浏览器配合；只有「测试连接」和「导出」才需要解密。
+
+**浏览器运行时的硬限制**：Chromium 系在运行时对 `Cookies` 库持有独占锁，
+`shutil.copy2` 直接 `WinError 32`。此时 `BrowserInfo.running=True`，UI 明确提示"关闭浏览器后重试或改用 cookies.txt"，
+绝不让"检测失败"看起来像程序出错。
+
+**两个必须避开的坑**（都踩过）：
+
+1. `urllib` 默认 opener 会读环境变量代理 —— 直连探测必须显式传 `ProxyHandler({})`，
+   否则"直连"其实走了代理，结果会撒谎。
+2. `urllib`/`socket` 的 timeout 是"每个地址每次操作"的上限，被墙域名解析出多个 IP 时会连续等好几个 timeout
+   （实测 YouTube 配 3.5s 要跑 7.2s）。因此探测统一用 `future.result(timeout=…)` 做**硬截止**，
+   DNS 另给 2s 上限，且**走代理时不解析本地 DNS**（由代理解析，本地污染不代表代理不可用）。
+
+### 7.9 三转写引擎
 
 | 模块 | 后端 | 时间戳策略 | 语言映射 |
 |---|---|---|---|
@@ -497,7 +528,7 @@ serve(server, sys.stdin, proto)
 - **VAD 自愈**：Silero VAD 滤除全部语音（纯音乐）时自动关闭重试一次。
 - **Qwen 分块**：长音频切 60s 块逐块推理，`on_event` 上报「第 i/n 块」进度。
 
-### 7.9 `writers.py` — 落盘
+### 7.10 `writers.py` — 落盘
 
 ```python
 def _write_text_retry(path, text, attempts=6):
@@ -514,7 +545,7 @@ def _write_text_retry(path, text, attempts=6):
 
 先写 `.tmp` 再 `os.replace`，配 6 次 `PermissionError` 退避。解决两个真实问题：杀毒软件扫目录时短暂锁定文件、用户正用别的程序打开产物。**不会留下半截文件**。
 
-### 7.10 `models.py` / `gpu_runtime.py`
+### 7.11 `models.py` / `gpu_runtime.py`
 
 - `default_model_dir()` → `%LOCALAPPDATA%\Bili Note\models`；`resolve_model_dir()` 支持自定义。
 - `scan_models()` / `describe_models()` 按三引擎特征文件判断完整性，驱动设置页「检测模型」。
@@ -524,7 +555,7 @@ def _write_text_retry(path, text, attempts=6):
   - **注册幂等**：`_registered_dirs` 防止每次转写都重复前置 PATH 导致无限膨胀。
 - `ensure_gpu_or_cpu()` 缺失包时静默回退 CPU，并提前 `ctypes.WinDLL("cublas64_12.dll")` 验证可加载，避免转写中途才崩。
 
-### 7.11 `keyframes.py` — 双后端
+### 7.12 `keyframes.py` — 双后端
 
 | 后端 | 判定方式 | 适用 |
 |---|---|---|
@@ -533,7 +564,7 @@ def _write_text_retry(path, text, attempts=6):
 
 公共策略：首帧必截；切换后 0.4s 截取；最小间隔 5s；上限 400 帧。`KeyframeError` 与用户取消不回退，直接上抛。
 
-### 7.12 `ui/` 三件套
+### 7.13 `ui/` 三件套
 
 - `state.py` — 模块首次导入时创建单例（store / settings / pipeline / events），与拆分前 `main.py` 行为一致。
 - `pages.py` — 四页签布局。
@@ -705,6 +736,7 @@ python scripts/release.py --single-only# 仅重建单文件版
 |---|---|---|
 | 存储 | `test_store.py` | 真实 SQLite 临时库 |
 | 下载 | `test_downloader.py` / `test_kuaishou.py` | mock yt-dlp / SSR HTML 夹具 |
+| 网络与 Cookie | `test_netcheck.py` / `test_native_dialog.py` | 临时 SQLite 造 Cookie 库、探测函数全 mock,不联网 |
 | 三引擎 | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel 注入；**并发 load() 回归**（`Barrier(2)` 断言只加载一次） |
 | 编排 | `test_pipeline.py` | FakeDownloader / FakeTranscriber mock 外部边界；含「重复提交不重排」「遗留任务恢复」「半路被杀恢复」 |
 | 服务层 | `test_headless.py` | running 语义 / stalled 检测 / prewarm / 4 项设置校验 / 状态别名 |

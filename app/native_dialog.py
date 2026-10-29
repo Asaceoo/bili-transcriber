@@ -27,6 +27,9 @@ MEDIA_FILTER = (
     "所有文件\0*.*\0"
 )
 
+# 设置页选 cookies.txt 用
+COOKIE_FILTER = "Cookie 文件 (*.txt)\0*.txt\0所有文件\0*.*\0"
+
 
 def parse_multiselect(raw: str) -> list[Path]:
     """解析 GetOpenFileNameW 的缓冲区:单选 = 完整路径;
@@ -40,8 +43,8 @@ def parse_multiselect(raw: str) -> list[Path]:
     return [base / name for name in parts[1:]]
 
 
-def pick_files(title: str = "选择要转写的视频/音频文件") -> list[Path]:
-    """弹出系统文件选择框(可多选);取消或失败返回空列表。"""
+def _open_dialog(title: str, file_filter: str, multiple: bool) -> list[Path]:
+    """弹出系统文件框,返回选中路径(取消/非 Windows/失败都返回空列表)。"""
     if sys.platform != "win32":
         return []
     import ctypes
@@ -78,14 +81,15 @@ def pick_files(title: str = "选择要转写的视频/音频文件") -> list[Pat
     ofn = OPENFILENAMEW()
     ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
     ofn.hwndOwner = None
-    ofn.lpstrFilter = MEDIA_FILTER
+    ofn.lpstrFilter = file_filter
     ofn.nFilterIndex = 1
     ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
     ofn.nMaxFile = len(buf)
     ofn.lpstrTitle = title
     # NOCHANGEDIR:防止对话框改变进程工作目录(PyInstaller 相对路径依赖 cwd)
-    ofn.Flags = (OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST
-                 | OFN_HIDEREADONLY | OFN_NOCHANGEDIR)
+    ofn.Flags = (OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR)
+    if multiple:
+        ofn.Flags |= OFN_ALLOWMULTISELECT
     try:
         if not ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn)):
             return []
@@ -93,3 +97,14 @@ def pick_files(title: str = "选择要转写的视频/音频文件") -> list[Pat
     except Exception:  # noqa: BLE001 — 对话框失败不应崩 UI,回退浏览器上传
         logger.exception("原生文件选择框调用失败")
         return []
+
+
+def pick_files(title: str = "选择要转写的视频/音频文件") -> list[Path]:
+    """弹出系统文件选择框(可多选);取消或失败返回空列表。"""
+    return _open_dialog(title, MEDIA_FILTER, multiple=True)
+
+
+def pick_file(title: str = "选择文件", file_filter: str = MEDIA_FILTER) -> Path | None:
+    """弹出系统文件选择框(单选);取消或失败返回 None。"""
+    paths = _open_dialog(title, file_filter, multiple=False)
+    return paths[0] if paths else None

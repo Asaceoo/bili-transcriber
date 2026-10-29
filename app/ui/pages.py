@@ -6,10 +6,11 @@ import json
 import logging
 import sys
 import threading
+from pathlib import Path
 
 from nicegui import run, ui
 
-from app import APP_VERSION, converter, native_dialog
+from app import APP_VERSION, converter, native_dialog, netcheck
 from app.gpu_runtime import default_gpu_dir
 from app.logging_setup import log_dir
 from app.models import resolve_model_dir
@@ -19,11 +20,57 @@ from app.ui.helpers import (
     _on_upload, _open_dir, _open_path, _pause, _reset_settings, _resume, _rerun,
 )
 from app.ui.state import (
-    ACTIVE_STATUSES, DATA_DIR, MODEL_OPTIONS, diary_state, diary_lines,
+    ACTIVE_STATUSES, BASE_DIR, DATA_DIR, MODEL_OPTIONS, diary_state, diary_lines,
     events, hw_results, pipeline, settings, store,
 )
 
 logger = logging.getLogger(__name__)
+
+# 设置页「网络与 Cookie」的交互动效:检测结果淡入上浮、状态徽章弹入、
+# 检测中按钮呼吸、等待文案闪烁。统一放这里,避免在页面函数里堆长字符串。
+_NETWORK_CSS = """
+<style>
+@keyframes bili-fade-up { from { opacity:0; transform: translateY(6px); } to { opacity:1; transform:none; } }
+@keyframes bili-pop { 0% { transform: scale(.92); opacity:0 } 70% { transform: scale(1.04) } 100% { transform: scale(1); opacity:1 } }
+@keyframes bili-pulse { 0% { box-shadow:0 0 0 0 rgba(251,114,153,.45) } 70% { box-shadow:0 0 0 12px rgba(251,114,153,0) } 100% { box-shadow:0 0 0 0 rgba(251,114,153,0) } }
+@keyframes bili-blink { 0%,100% { opacity:.45 } 50% { opacity:1 } }
+@keyframes bili-spin { to { transform: rotate(360deg); } }
+.bili-fade-up { animation: bili-fade-up .34s cubic-bezier(.22,.61,.36,1) both; }
+.bili-pop { animation: bili-pop .3s cubic-bezier(.22,.61,.36,1) both; }
+.bili-pulse { animation: bili-pulse 1.6s ease-out infinite; }
+.bili-pulse .q-icon { animation: bili-spin 1.1s linear infinite; }
+.bili-blink { animation: bili-blink 1.2s ease-in-out infinite; }
+/* 未激活步骤:灰字 + 半透明,和激活态的粉色拉开距离(只调透明度时深色文字仍然显眼) */
+.bili-step { color:#9aa4b2; opacity:.7;
+  transition: opacity .25s ease, color .25s ease, transform .25s ease; }
+.bili-step.active { opacity:1; color:#fb7299; font-weight:600; transform: translateY(-1px); }
+.bili-chip { transition: transform .18s ease, box-shadow .18s ease; }
+.bili-chip:hover { transform: translateY(-2px); box-shadow: 0 6px 14px rgba(0,0,0,.08); }
+@media (prefers-reduced-motion: reduce) {
+  .bili-fade-up, .bili-pop, .bili-pulse, .bili-blink { animation: none !important; }
+}
+</style>
+"""
+
+# 徽章配色:Tailwind 标准色阶(浅底 + 深字),深浅主题都不刺眼
+_CHIP_KINDS = {
+    "ok": ("bg-green-50", "text-green-700", "text-green-500"),
+    "warn": ("bg-amber-50", "text-amber-800", "text-amber-500"),
+    "bad": ("bg-red-50", "text-red-700", "text-red-400"),
+    "info": ("bg-blue-50", "text-blue-700", "text-blue-500"),
+    "muted": ("bg-gray-100", "text-gray-500", "text-gray-400"),
+}
+
+# 「测试连接」里 Cookie 状态 -> 徽章(种类, 图标, 文案)
+_COOKIE_STATE_CHIP = {
+    "verified": ("ok", "verified", "已登录(已校验)"),
+    "present": ("info", "person", "已登录"),
+    "expired": ("warn", "schedule", "Cookie 已过期"),
+    "missing": ("muted", "remove_circle_outline", "无 Cookie"),
+    "unreadable": ("bad", "lock", "读取失败"),
+    "unknown": ("muted", "help_outline", "未验证"),
+}
+
 
 # ---------- QTable 插槽模板 ----------
 _STATUS_BADGE = '''
@@ -111,6 +158,7 @@ _ACTIONS_CELL = '''
 @ui.page("/")
 def main_page() -> None:
     ui.colors(primary="#fb7299")
+    ui.add_head_html(_NETWORK_CSS)
 
     with ui.header().classes("items-center justify-between"):
         ui.label("视频音频本地转写").classes("text-lg font-bold")
@@ -286,7 +334,7 @@ def main_page() -> None:
 
         # ---------- 设置页 ----------
         with ui.tab_panel(tab_settings):
-            with ui.card().classes("max-w-lg"):
+            with ui.card().classes("w-full max-w-3xl"):
                 with ui.column().classes("gap-3"):
                     out_input = ui.input("输出目录(相对项目根或绝对路径)").bind_value(
                         settings, "output_dir").classes("w-full")
@@ -350,23 +398,351 @@ def main_page() -> None:
                     # ---------- 网络与 Cookie(多平台下载) ----------
                     ui.separator().classes("w-full")
                     ui.label("网络与 Cookie(下载视频用)").classes("font-medium")
-                    ui.select(
-                        {"": "不使用", "chrome": "Chrome", "edge": "Edge",
-                         "firefox": "Firefox", "brave": "Brave", "opera": "Opera",
+                    ui.label(
+                        "点「一键检测」自动识别浏览器登录态、cookies.txt 与本机代理,"
+                        "自动填好下面的输入框;再点「测试连接」验证,最后保存即可。"
+                    ).classes("text-xs text-grey-6")
+
+                    step_labels = []
+                    with ui.row().classes("items-center gap-1 text-xs"):
+                        for idx, (num, text) in enumerate(
+                                (("①", "检测"), ("②", "测试"), ("③", "保存"))):
+                            if idx:
+                                ui.icon("chevron_right").classes("text-grey-4").style("font-size:14px")
+                            step_labels.append(ui.label(f"{num} {text}").classes("bili-step"))
+
+                    def _set_step(active: int) -> None:
+                        for idx, label in enumerate(step_labels, start=1):
+                            if idx <= active:
+                                label.classes(add="active")
+                            else:
+                                label.classes(remove="active")
+
+                    def _cookie_dirs() -> list[Path]:
+                        """cookies.txt 的搜索范围:项目目录/data/下载/桌面/文档 + 输出目录。"""
+                        dirs = netcheck.default_cookie_dirs(BASE_DIR, DATA_DIR)
+                        out_dir = settings.resolve_output_dir(BASE_DIR)
+                        if out_dir not in dirs:
+                            dirs.append(out_dir)
+                        return dirs
+
+                    with ui.row().classes("w-full items-center gap-2"):
+                        detect_btn = ui.button(
+                            "一键检测本机网络与 Cookie", icon="travel_explore",
+                            on_click=lambda: _run_detect(),
+                        ).props("unelevated no-caps color=primary").classes("bili-cta")
+                        detect_hint = ui.label("约 3~5 秒").classes("text-xs text-grey-5")
+
+                    net_progress = ui.linear_progress(value=0, show_value=False) \
+                        .props("rounded size=6px instant-feedback color=primary").classes("w-full")
+                    net_progress.set_visibility(False)
+                    net_status = ui.label("").classes("text-xs text-grey-7")
+
+                    net_result = ui.column().classes("w-full gap-2")
+                    with net_result:
+                        ui.label("还没有检测。点上面的按钮,软件会自己找 Cookie 和可用代理。"
+                                 ).classes("text-xs text-grey-5")
+
+                    def _chip(kind: str, icon: str, text: str, delay: float = 0.0) -> None:
+                        """状态徽章:浅底圆角 + 悬停上浮 + 依次弹入。"""
+                        bg, fg, icon_fg = _CHIP_KINDS.get(kind, _CHIP_KINDS["muted"])
+                        with ui.row().classes(
+                                f"items-center gap-1 px-2 py-1 rounded-md {bg} bili-chip bili-pop "
+                                "max-w-full").style(f"animation-delay:{delay:.2f}s"):
+                            ui.icon(icon).classes(icon_fg).style("font-size:15px")
+                            ui.label(text).classes(f"text-xs {fg} leading-snug")
+
+                    def _render_detection(report) -> None:
+                        """把检测结果画成一屏能看懂的状态:平台登录态 / 网络 / 代理 + 原因。"""
+                        net_result.clear()
+                        states = report.platform_states
+                        with net_result:
+                            with ui.column().classes("w-full gap-2 bili-fade-up"):
+                                with ui.row().classes("items-center gap-2 flex-wrap w-full"):
+                                    ui.label("平台登录态").classes("text-xs text-grey-6").style("width:64px")
+                                    for idx, platform in enumerate(netcheck.PLATFORMS):
+                                        name = netcheck.PLATFORM_LABEL[platform]
+                                        cookie = states.get(platform)
+                                        if cookie and not cookie.expired:
+                                            _chip("ok", "check_circle", name, idx * 0.05)
+                                        else:
+                                            _chip("muted", "remove_circle_outline", name, idx * 0.05)
+                                with ui.row().classes("items-center gap-2 flex-wrap w-full"):
+                                    ui.label("网络").classes("text-xs text-grey-6").style("width:64px")
+                                    for idx, platform in enumerate(netcheck.PLATFORMS):
+                                        probe = report.network.direct.get(platform)
+                                        name = netcheck.PLATFORM_LABEL[platform]
+                                        if probe and probe.ok:
+                                            _chip("ok", "wifi", f"{name} {probe.ms}ms", 0.15 + idx * 0.05)
+                                        else:
+                                            _chip("bad", "wifi_off", f"{name} 直连不通", 0.15 + idx * 0.05)
+                                if report.network.working_proxy:
+                                    with ui.row().classes("items-center gap-2 flex-wrap w-full"):
+                                        ui.label("代理").classes("text-xs text-grey-6").style("width:64px")
+                                        _chip("ok", "lan",
+                                              f"{report.network.working_proxy} 可用", 0.35)
+                                for line in report.notes:
+                                    ui.label(f"· {line}").classes("text-xs text-grey-6")
+
+                    def _apply_detection(report) -> None:
+                        """自动填写:只在识别到更优来源时写,绝不清空用户已有配置。"""
+                        changed: list[str] = []
+                        if report.suggested_browser and \
+                                report.suggested_browser != settings.cookies_from_browser:
+                            settings.cookies_from_browser = report.suggested_browser
+                            browser_select.set_value(report.suggested_browser)
+                            changed.append(f"浏览器={report.suggested_browser}")
+                        if report.suggested_cookie_file and \
+                                report.suggested_cookie_file != settings.cookie_file:
+                            settings.cookie_file = report.suggested_cookie_file
+                            cookie_input.set_value(report.suggested_cookie_file)
+                            changed.append(f"cookies.txt={Path(report.suggested_cookie_file).name}")
+                        if report.suggested_proxy and report.suggested_proxy != settings.proxy:
+                            settings.proxy = report.suggested_proxy
+                            proxy_input.set_value(report.suggested_proxy)
+                            changed.append(f"代理={report.suggested_proxy}")
+                        if changed:
+                            ui.notify("已自动填写:" + "、".join(changed), type="positive", timeout=5000)
+                        else:
+                            ui.notify("检测完成;当前设置已是最优,无需改动", timeout=4000)
+
+                    async def _run_detect() -> None:
+                        # 用 set_text 而不是 Quasar 的 loading 属性:后者会把按钮文案吃掉,
+                        # 只剩一个空白粉块,用户看不出在干什么。
+                        detect_btn.set_text("正在检测…")
+                        detect_btn.props("disable")
+                        detect_btn.classes(add="bili-pulse")
+                        detect_hint.set_text("稍等,正在探测网络")
+                        detect_hint.classes(add="bili-blink")
+                        net_result.clear()
+                        test_result.clear()
+                        net_progress.set_visibility(True)
+                        net_progress.set_value(0.06)
+                        net_status.set_text("正在扫描本机浏览器与 cookies.txt…")
+                        _set_step(1)
+                        try:
+                            browsers = await run.io_bound(netcheck.detect_browsers)
+                            net_progress.set_value(0.32)
+                            net_status.set_text(
+                                f"已发现 {len(browsers)} 个浏览器配置,正在找 cookies.txt…")
+                            files = await run.io_bound(
+                                netcheck.detect_cookie_files, _cookie_dirs(), [settings.cookie_file])
+                            net_progress.set_value(0.5)
+                            net_status.set_text("正在探测网络与代理(YouTube 可能要等几秒)…")
+                            network = await run.io_bound(netcheck.probe_network)
+                            net_progress.set_value(0.9)
+                            net_status.set_text("正在生成自动填写建议…")
+                            report = netcheck.build_report(
+                                browsers, files, network,
+                                current_browser=settings.cookies_from_browser,
+                                current_cookie_file=settings.cookie_file,
+                                current_proxy=settings.proxy,
+                            )
+                            net_progress.set_value(1.0)
+                            _render_detection(report)
+                            _apply_detection(report)
+                            _set_step(2)
+                            net_status.set_text(
+                                "检测完成,已按最优来源填好;下一步点「② 测试连接」验证能不能用。")
+                        except Exception as exc:  # noqa: BLE001 — 检测失败不能把设置页打崩
+                            logger.exception("网络与 Cookie 检测失败")
+                            net_status.set_text(f"检测失败:{exc}")
+                            ui.notify(f"检测失败:{exc}", type="negative")
+                        finally:
+                            detect_btn.set_text("一键检测本机网络与 Cookie")
+                            detect_btn.props(remove="disable")
+                            detect_btn.classes(remove="bili-pulse")
+                            detect_hint.set_text("可重复检测")
+                            detect_hint.classes(remove="bili-blink")
+                            ui.timer(1.1, lambda: net_progress.set_visibility(False), once=True)
+
+                    def _render_test(report) -> None:
+                        test_result.clear()
+                        with test_result:
+                            with ui.column().classes("w-full gap-2 bili-fade-up"):
+                                # flex-wrap + 让长结论自己换行:总结文案(30 字)加上「来源」会顶出卡片右边界
+                                with ui.row().classes("items-center gap-2 w-full flex-wrap"):
+                                    if report.ok:
+                                        _chip("ok", "verified", report.summary)
+                                    else:
+                                        _chip("warn", "error_outline", report.summary)
+                                    ui.label(f"来源:{report.source}").classes(
+                                        "text-xs text-grey-5 flex-grow min-w-0")
+                                for idx, item in enumerate(report.items):
+                                    kind, icon, text = _COOKIE_STATE_CHIP.get(
+                                        item.cookie_state, _COOKIE_STATE_CHIP["unknown"])
+                                    with ui.row().classes(
+                                            "items-center gap-2 w-full flex-wrap bili-fade-up") \
+                                            .style(f"animation-delay:{idx * 0.04:.2f}s"):
+                                        ui.icon("wifi" if item.network_ok else "wifi_off") \
+                                            .classes("text-green-500" if item.network_ok else "text-red-400") \
+                                            .style("font-size:16px")
+                                        ui.label(netcheck.PLATFORM_LABEL[item.platform]) \
+                                            .classes("text-xs font-medium").style("width:56px")
+                                        ui.label(f"{item.ms} ms" if item.network_ok else "不可达") \
+                                            .classes("text-xs text-grey-5").style("width:52px")
+                                        _chip(kind, icon, text, idx * 0.04)
+                                        ui.label(item.detail).classes(
+                                            "text-xs text-grey-6 flex-grow min-w-0")
+                                for warning in report.warnings:
+                                    ui.label(f"! {warning}").classes("text-xs text-amber-700")
+
+                    async def _run_test() -> None:
+                        test_btn.set_text("测试中…")
+                        test_btn.props("disable")
+                        test_btn.classes(add="bili-pulse")
+                        test_result.clear()
+                        with test_result:
+                            ui.label("正在测试:逐个平台探测网络,并校验 Cookie 登录态…"
+                                     ).classes("text-xs text-grey-6 bili-blink")
+                        _set_step(2)
+                        try:
+                            report = await run.io_bound(
+                                netcheck.test_configuration,
+                                settings.cookies_from_browser, settings.cookie_file, settings.proxy)
+                            _render_test(report)
+                            _set_step(3 if report.ok else 2)
+                            ui.notify(report.summary,
+                                      type="positive" if report.ok else "warning", timeout=5000)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception("网络与 Cookie 测试失败")
+                            ui.notify(f"测试失败:{exc}", type="negative")
+                        finally:
+                            test_btn.set_text("② 测试连接")
+                            test_btn.props(remove="disable")
+                            test_btn.classes(remove="bili-pulse")
+
+                    async def _pick_cookie_file() -> None:
+                        path = await run.io_bound(
+                            native_dialog.pick_file, "选择 cookies.txt 文件",
+                            native_dialog.COOKIE_FILTER)
+                        if not path:
+                            return
+                        cookie_input.set_value(str(path))
+                        total, platforms, _values, error = await run.io_bound(
+                            netcheck.parse_cookie_file, path)
+                        if error:
+                            ui.notify(error, type="negative")
+                            return
+                        names = "、".join(netcheck.PLATFORM_LABEL[p] for p in platforms
+                                         if platforms[p].present and not platforms[p].expired)
+                        if names:
+                            ui.notify(f"已载入 {total} 条 Cookie,含 {names} 登录态", type="positive")
+                        else:
+                            ui.notify(f"已载入 {total} 条 Cookie,但没识别到平台登录态", type="warning")
+
+                    async def _probe_proxy() -> None:
+                        probe_btn.set_text("探测中…")
+                        probe_btn.props("disable")
+                        probe_btn.classes(add="bili-pulse")
+                        try:
+                            found = await run.io_bound(netcheck.find_working_proxy)
+                        finally:
+                            probe_btn.set_text("探测")
+                            probe_btn.props(remove="disable")
+                            probe_btn.classes(remove="bili-pulse")
+                        if found is None:
+                            ui.notify("没找到可用代理:请先启动代理软件(Clash / v2rayN 等)",
+                                      type="warning", timeout=5000)
+                            return
+                        proxy_input.set_value(found.url)
+                        ui.notify(f"已找到可用代理:{found.url}({found.ms} ms)", type="positive")
+
+                    async def _export_cookies() -> None:
+                        browser = settings.cookies_from_browser
+                        if not browser:
+                            ui.notify("请先在上面选择要导出的浏览器", type="warning")
+                            return
+                        dest = DATA_DIR / "cookies.txt"
+                        try:
+                            path = await run.io_bound(
+                                netcheck.export_browser_cookies, browser, dest)
+                        except netcheck.NetcheckError as exc:
+                            ui.notify(str(exc), type="negative", timeout=6000)
+                            return
+                        cookie_input.set_value(str(path))
+                        ui.notify(f"已导出到 {path}(内含登录凭据,请勿分享)", type="positive",
+                                  timeout=6000)
+
+                    browser_select = ui.select(
+                        {"": "不使用", "chrome": "Chrome", "edge": "Edge", "firefox": "Firefox",
+                         "brave": "Brave", "chromium": "Chromium", "opera": "Opera",
                          "vivaldi": "Vivaldi"},
                         label="浏览器 Cookie(抖音/部分 YouTube 视频需要)",
                         value=settings.cookies_from_browser,
                     ).bind_value(settings, "cookies_from_browser").classes("w-full")
-                    ui.input(
-                        "cookies.txt 文件路径(Netscape 格式,优先于浏览器 Cookie)"
-                    ).bind_value(settings, "cookie_file").classes("w-full")
-                    ui.input(
-                        "网络代理(YouTube 等境外平台需要,如 http://127.0.0.1:7890)"
-                    ).bind_value(settings, "proxy").classes("w-full")
-                    ui.label(
-                        "说明:B 站/抖音/小红书/快手国内直连即可;YouTube 需自行配置代理。\n"
-                        "Cookie 用于访问需要登录的内容(高清/会员视频等),从浏览器读取或导出 cookies.txt。"
-                    ).classes("text-xs text-grey-6")
+
+                    with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                        cookie_input = ui.input(
+                            "cookies.txt 文件路径(Netscape 格式,优先于浏览器 Cookie)"
+                        ).bind_value(settings, "cookie_file").classes("flex-grow")
+                        ui.button(icon="folder_open", on_click=lambda: _pick_cookie_file()) \
+                            .props("flat round dense color=grey-7").tooltip("选择 cookies.txt 文件")
+
+                    with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                        proxy_input = ui.input(
+                            "网络代理(YouTube 等境外平台需要,如 http://127.0.0.1:7890)"
+                        ).bind_value(settings, "proxy").classes("flex-grow")
+                        probe_btn = ui.button("探测", icon="lan", on_click=lambda: _probe_proxy()) \
+                            .props("flat dense no-caps color=grey-8").tooltip("扫描本机常见代理端口")
+
+                    with ui.row().classes("w-full items-center gap-2"):
+                        test_btn = ui.button("② 测试连接", icon="wifi_tethering",
+                                             on_click=lambda: _run_test()) \
+                            .props("outline no-caps color=primary")
+                        ui.button("③ 保存设置", icon="save", on_click=lambda: _save_network()) \
+                            .props("unelevated no-caps")
+                        ui.label("保存后立即生效,不用重启").classes("text-xs text-grey-5")
+
+                    test_result = ui.column().classes("w-full gap-2")
+
+                    def _save_network() -> None:
+                        """保存按钮:设置页所有值一起落盘,并把步骤条点亮到第 ③ 步。"""
+                        save()
+                        _set_step(3)
+
+                    with ui.expansion("各平台到底需不需要 Cookie / 代理?", icon="table_chart") \
+                            .classes("w-full"):
+                        ui.markdown(
+                            "| 平台 | 需要 Cookie? | 需要代理? | 说明 |\n"
+                            "| --- | --- | --- | --- |\n"
+                            "| B 站 | 多数不需要 | 不需要 | 1080P+/大会员/部分番剧要登录态 |\n"
+                            "| 抖音 | **建议要** | 不需要 | 未登录常被风控,报 cookie 错误 |\n"
+                            "| 小红书 | **建议要** | 不需要 | 登录后才返回完整视频地址 |\n"
+                            "| 快手 | 一般不需要 | 不需要 | 走分享页解析,无需登录 |\n"
+                            "| YouTube | 部分需要 | **必须** | 年龄限制/会员视频要登录;境内需代理 |\n"
+                        )
+                    with ui.expansion("三种 Cookie 来源怎么选?", icon="source").classes("w-full"):
+                        ui.markdown(
+                            "1. **浏览器 Cookie(最省事)**:软件直接读你浏览器里的登录态。\n"
+                            "   缺点:浏览器**正在运行**时 Cookie 库被独占锁定,读不到也下载不了带 Cookie 的内容。\n"
+                            "2. **cookies.txt(最稳)**:优先于浏览器 Cookie,不受浏览器开关影响;"
+                            "可用下面的「导出」按钮生成。\n"
+                            "3. **都不用**:只下载公开内容,B 站普通视频足够。\n\n"
+                            "> 提示:导出文件内含登录凭据,只存在本机 `data/` 目录,不要发给别人。"
+                        )
+                        ui.button("从浏览器导出 cookies.txt", icon="download",
+                                  on_click=lambda: _export_cookies()).props("flat dense no-caps")
+                    with ui.expansion("检测结果 / 测试结果怎么看?", icon="fact_check") \
+                            .classes("w-full"):
+                        ui.markdown(
+                            "- **平台登录态**:绿点 = 在某个来源里找到该平台登录 Cookie;灰点 = 没找到"
+                            "(不代表不能下,只是清晰度/风控可能受限)。\n"
+                            "- **网络**:各平台直连延迟;红标 = 连不上,境外平台通常是没配代理。\n"
+                            "- **已登录(已校验)**:用 B 站接口真实核对了账号,最可靠。\n"
+                            "- **已登录**:只确认 Cookie 存在,没做在线校验(抖音/小红书接口需签名)。\n"
+                            "- **读取失败(锁图标)**:浏览器正在运行,Cookie 库被占用 → 关掉浏览器再测,"
+                            "或改用 cookies.txt。"
+                        )
+                    with ui.expansion("下载失败的常见原因", icon="build").classes("w-full"):
+                        ui.markdown(
+                            "- **提示需要 Cookie**:先在浏览器登录该平台,再点「一键检测」;"
+                            "或导出 cookies.txt 指给软件。\n"
+                            "- **抖音/小红书解析失败**:多为登录态过期 → 重新登录后重新导出。\n"
+                            "- **YouTube 解析超时**:检查代理端口是否填对(设置页「探测」可自动找),"
+                            "代理软件是否允许局域网连接。\n"
+                            "- **B 站高清只有 480P**:需要登录 Cookie(大会员内容还要大会员账号)。"
+                        )
 
                     # 并发工作线程数:影响下载/转码并行度(转写始终串行保护 GPU)
                     ui.select(
@@ -449,7 +825,7 @@ def main_page() -> None:
                             out_input, model_dir_input, refresh_model_status)).props("flat")
 
             # ---------- 硬件检测与设备建议 ----------
-            with ui.card().classes("max-w-lg mt-4"):
+            with ui.card().classes("w-full max-w-3xl mt-4"):
                 with ui.column().classes("gap-3"):
                     ui.label("硬件检测与设备建议").classes("font-medium")
                     hw_status = ui.label(
@@ -496,7 +872,7 @@ def main_page() -> None:
                                   on_click=lambda: _open_dir(default_gpu_dir()))
 
             # ---------- 关于与帮助 ----------
-            with ui.card().classes("max-w-lg mt-4"):
+            with ui.card().classes("w-full max-w-3xl mt-4"):
                 ui.label(f"关于与帮助 · v{APP_VERSION}").classes("font-medium")
                 ui.label(
                     "纯本地处理:音频/视频与转写文本均不上传(仅首次使用时联网下载模型)。\n"
@@ -555,7 +931,11 @@ def main_page() -> None:
                         "- **唱歌/纯音乐没字幕**:VAD 只识别人声,程序会自动关闭 VAD 重试,属正常。\n"
                         "- **链接解析失败**:B 站接口变动,`pip install -U yt-dlp` 后重试。\n"
                         "- **端口被占用**:设置环境变量 `BILI_PORT=9000` 后启动。\n"
-                        "- **需要 FFmpeg 吗?**:不需要,软件内置(若系统装有完整版会优先使用)。"
+                        "- **需要 FFmpeg 吗?**:不需要,软件内置(若系统装有完整版会优先使用)。\n"
+                        "- **抖音/小红书要登录吗?**:建议要。设置页「一键检测本机网络与 Cookie」"
+                        "会自动识别浏览器登录态并填好。\n"
+                        "- **YouTube 打不开?**:先配代理。同一节的「探测」按钮会扫本机代理端口"
+                        "并验证哪个真能访问 YouTube。"
                     )
                 with ui.expansion("输出文件与数据说明", icon="folder").classes("w-full"):
                     ui.markdown(
