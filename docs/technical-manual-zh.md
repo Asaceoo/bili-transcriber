@@ -1,819 +1,358 @@
-# bili-transcriber 技术手册（中文）
+# 技术手册 —— bili-transcriber
 
-> 面向开发者与维护者。讲清架构分层、并发模型、状态机、模块职责、数据契约、安全边界、打包坑位与测试体系。
-> 本手册对应 **v0.1.44** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
-> 带版本号的发布快照见 [technical-manual-zh-0.1.44.md](technical-manual-zh-0.1.44.md)。
+> 对应版本 **v0.1.45** · 面向要改代码、要发布、要排障的人。
+> 想知道"怎么用"，看 [用户手册](user-guide-zh.md)。
 
 ---
 
 ## 目录
 
-1. [系统概览](#1-系统概览)
-2. [分层架构](#2-分层架构)
-3. [技术栈](#3-技术栈)
-4. [目录结构](#4-目录结构)
-5. [并发与线程模型](#5-并发与线程模型)
-6. [状态机与任务恢复](#6-状态机与任务恢复)
-7. [模块职责](#7-模块职责)
-8. [数据契约](#8-数据契约)
-9. [安全与健壮性设计](#9-安全与健壮性设计)
-10. [打包兼容性坑位](#10-打包兼容性坑位)
-11. [构建与发布](#11-构建与发布)
-12. [测试体系](#12-测试体系)
-13. [已知限制](#13-已知限制)
+1. [架构总览](#1-架构总览)
+2. [数据流与状态机](#2-数据流与状态机)
+3. [模块地图](#3-模块地图)
+4. [三个转写引擎](#4-三个转写引擎)
+5. [网络与 Cookie 子系统](#5-网络与-cookie-子系统)
+6. [无界面层（CLI / MCP）](#6-无界面层cli--mcp)
+7. [桌面界面层](#7-桌面界面层)
+8. [打包与发布](#8-打包与发布)
+9. [质量基线与测试](#9-质量基线与测试)
+10. [已知限制与设计取舍](#10-已知限制与设计取舍)
 
 ---
 
-## 1. 系统概览
+## 1. 架构总览
 
-bili-transcriber 是一个**纯本地的多平台视频 / 音频转写工具**，有三种驱动方式（GUI / CLI / MCP）共用同一套服务层。
+<img src="../docs/assets/pipeline.svg" alt="数据流" width="100%" />
 
-核心链路：
+三层，边界很硬：
 
-```
-输入：链接(B站/抖音/小红书/快手/YouTube) 或 本地音视频文件
-  → 探测展开（平台识别 / 短链展开 / 单P·多P·合集 → N 条任务）
-  → 下载最佳音频流（开启讲义时改下视频流）
-  → FFmpeg 转码 16kHz 单声道 WAV
-  → 本地推理（faster-whisper / Qwen3-ASR / SenseVoice 三选一）
-  → 可选：关键帧提取 → 图文讲义
-  → 落盘 SRT / TXT / Markdown
-```
-
-**设计原则（贯穿全项目）：**
-
-| 原则 | 落地方式 |
-|---|---|
-| 数据不上传 | 无任何外部 AI API 调用；只有下载视频和拉模型两次出站 |
-| 断点续跑 | 音频 / WAV / 视频路径缓存复用；启动时恢复遗留进行中任务 |
-| GPU 不并发争用 | 转写全程持引擎锁，同一时刻只有一个任务占卡 |
-| UI 与计算解耦 | 工作线程只写 Store / 事件队列，UI 线程只读轮询 |
-| 单一来源 | 版本号只在 `pyproject.toml`；状态集合只在 `pipeline.py` |
-
----
-
-## 2. 分层架构
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  驱动层                                                   │
-│  app/main.py (GUI)   app/cli.py (CLI)   app/mcp_server.py │
-└───────────────┬──────────────┬───────────────┬───────────┘
-                │              │               │
-                │       ┌──────┴───────┐       │
-                │       │ app/headless │◀──────┘  服务层(唯一业务入口)
-                │       │   Service    │
-                │       └──────┬───────┘
-                ▼              ▼
-┌──────────────────────────────────────────────────────────┐
-│  编排层  app/pipeline.py (Task / 状态机 / 工作线程池)      │
-└──────────────────────────────────────────────────────────┘
-                │
-┌───────────────┴──────────────────────────────────────────┐
-│  能力层                                                   │
-│  downloader / kuaishou / converter / transcriber /       │
-│  qwen_transcriber / sensevoice_transcriber / keyframes / │
-│  writers / models / gpu_runtime / hardware / ffmpeg_bin  │
-└──────────────────────────────────────────────────────────┘
-                │
-┌───────────────┴──────────────────────────────────────────┐
-│  基础层  paths / store / task_control / native_dialog /   │
-│          tray / logging_setup                            │
-└──────────────────────────────────────────────────────────┘
+```text
+┌────────────────────────────── 入口层 ──────────────────────────────┐
+│  main.py (GUI 分发器)   cli.py (命令行)   mcp_server.py / mcp_http.py │
+└───────────────────────────────┬───────────────────────────────────┘
+                                ↓ 都依赖同一套服务层
+┌────────────────────────── 服务层 headless.py ──────────────────────┐
+│  Service: submit / wait / status / list / transcript / search /   │
+│           cancel / prewarm / get_settings / set_settings          │
+└───────────────────────────────┬───────────────────────────────────┘
+                                ↓
+┌────────────────────────── 编排层 pipeline.py ──────────────────────┐
+│  单工作线程串行编排 + 状态机 + 断点续跑 + 模型缓存/卸载            │
+└───┬──────────┬──────────┬──────────┬──────────┬───────────────────┘
+    ↓          ↓          ↓          ↓          ↓
+downloader  converter  transcriber   writers    store
+（yt-dlp）  （FFmpeg）  （三引擎）   （SRT/TXT/MD）（SQLite）
 ```
 
-**关键点：CLI 与 MCP 不直接碰 pipeline**，一律经 `app/headless.py` 的 `Service`。这样：
+**为什么这样切**：三个入口（GUI / CLI / MCP）必须行为一致 —— 否则"桌面端能转、CLI 不能"这种
+分裂会不断出现。所以入口层只做协议转换，所有业务都在 `Service` 与 `pipeline` 里。
 
-- 两条 AI 通道行为完全一致，只有传输方式不同。
-- 参数校验、JSON 序列化、错误包装只有一处实现。
-- 加新通道（HTTP / 消息队列）时不用改业务逻辑。
+**app/ 共 32 个 Python 文件**（28 顶层 + `ui/` 4 个）。
 
----
+## 2. 数据流与状态机
 
-## 3. 技术栈
+### 2.1 一次任务的完整路径
 
-| 层 | 选型 |
-|---|---|
-| 语言 | Python ≥ 3.11（开发环境 3.14） |
-| 下载 | yt-dlp（B站 / 抖音 / 小红书 / YouTube）+ 自研快手 SSR 解析 |
-| 转码 | FFmpeg（subprocess；内置 imageio-ffmpeg 静态版，`app/ffmpeg_bin.py` 解析） |
-| 推理 1 | faster-whisper + ctranslate2（CUDA 后端，默认） |
-| 推理 2 | qwen-asr（Qwen3-ASR 0.6B / 1.7B，torch 后端） |
-| 推理 3 | sherpa-onnx（SenseVoiceSmall，ONNX int8） |
-| 关键帧 | FFmpeg scene 检测（优先）/ PyAV 逐帧 MAD（回退），双后端 |
-| UI | NiceGUI（Quasar 组件）+ pywebview 原生窗口（WebView2）；检测不到 WebView2 才退回浏览器 |
-| 托盘 | pystray（失败静默降级） |
-| 原生对话框 | ctypes comdlg32（Windows 文件选择框） |
-| 单实例 | ctypes `CreateMutexW` |
-| 存储 | SQLite（history.db）+ JSON（settings.json） |
-| 构建 | hatchling（wheel）+ PyInstaller（onedir / onefile）+ InnoSetup |
-
----
-
-## 4. 目录结构
-
-```
-bili-transcriber/
-├── app/                        # 应用源码（31 个模块，约 9700 行）
-│   ├── __init__.py             # APP_VERSION + frozen 模式 DLL 搜索路径
-│   ├── paths.py                # 运行时路径解析（GUI/CLI/MCP 共用同一份 data/）
-│   ├── main.py                 # 启动入口：单实例 / 端口 / 托盘 / UI 装配
-│   ├── pipeline.py             # 核心编排：状态机 / 工作线程池 / 引擎锁
-│   ├── headless.py             # 服务层：CLI 与 MCP 的唯一业务入口
-│   ├── cli.py                  # 命令行驱动
-│   ├── mcp_server.py           # MCP stdio 服务端（JSON-RPC 2.0 子集）
-│   ├── downloader.py           # 下载编排：平台识别 / 短链 / SSR / Cookie / 代理
-│   ├── netcheck.py             # 网络与 Cookie 自动检测（浏览器扫描 / 代理探测 / 配置测试）
-│   ├── kuaishou.py             # 快手分享页 SSR 解析（免登录提取 mp4 直链）
-│   ├── converter.py            # FFmpeg → 16kHz 单声道 WAV
-│   ├── transcriber.py          # 引擎 1：faster-whisper
-│   ├── qwen_transcriber.py     # 引擎 2：Qwen3-ASR（分块转写 + 对齐器）
-│   ├── sensevoice_transcriber.py # 引擎 3：SenseVoice（token→段时间戳）
-│   ├── keyframes.py            # 关键帧提取（ffmpeg scene / PyAV 双后端）
-│   ├── writers.py              # SRT / TXT / MD / notes 落盘（原子写）
-│   ├── models.py               # 模型目录扫描 / 检测 / 定位（三引擎）
-│   ├── gpu_runtime.py          # 外置 GPU 加速包 DLL 注册
-│   ├── ffmpeg_bin.py           # ffmpeg 二进制解析（PATH 优先，内置兜底）
-│   ├── hardware.py             # 硬件探测（GPU 型号 / 显存 / CUDA 可用性）
-│   ├── store.py                # SQLite + JSON 设置（14 项定义）
-│   ├── task_control.py         # 任务级暂停 / 取消（线程安全）
-│   ├── native_dialog.py        # Windows 原生文件选择框（ctypes comdlg32）
-│   ├── tray.py                 # 系统托盘（pystray，失败静默降级）
-│   ├── logging_setup.py        # 日志初始化
-│   └── ui/                     # UI 层（从 main.py 拆分）
-│       ├── state.py            # 共享单例：store / settings / pipeline / events
-│       ├── pages.py            # 四个页签的布局构建
-│       └── helpers.py          # 动作函数：开文件夹 / 任务操作 / 上传落盘
-├── build/
-│   ├── bili-transcriber.spec         # PyInstaller onedir
-│   ├── bili-transcriber-onefile.spec # PyInstaller onefile
-│   ├── preload_transformers.py       # 运行时钩子（transformers / nagisa 兼容）
-│   ├── installer.iss                 # InnoSetup 脚本
-│   └── smoke_*.py / verify_*.py      # 打包冒烟与验证
-├── scripts/
-│   ├── release.py              # 一键发布：bump + 五产物 + 文档快照
-│   ├── e2e_check.py            # 端到端链路检查
-│   └── bdelete/ clean_*/ move_old/ sh_delete.py  # 沙箱安全删除工具
-├── tests/                      # pytest（29 文件 / 525 用例）
-├── docs/                       # 双语手册 + assets/ 概念图
-├── data/                       # settings.json + history.db（运行时；日志在 %LOCALAPPDATA%\Bili Note\logs）
-├── output/                     # 转写产物（运行时）
-└── pyproject.toml              # 版本单一来源
+```text
+submit(url)
+  → downloader.probe(url)             展开成 MediaInfo 列表（单 P / 多 P / 合集）
+  → 每个条目 enqueue
+  → worker 取出 →
+      [1] downloader.download_audio   只下音频流（notes 开启时下视频流）
+      [2] converter.to_wav            16 kHz 单声道 WAV
+      [3] transcriber.transcribe      GPU 转写，持锁
+      [4] writers.write_*             SRT / TXT / MD（+ notes）
+      [5] store.upsert                写历史库
+  → done
 ```
 
----
+### 2.2 状态机
 
-## 5. 并发与线程模型
-
-### 5.1 三层结构
-
-```
-┌──────────────┐   Store / SQLite      ┌──────────────────┐
-│   UI 线程     │ ─── 只读轮询 0.6s ──▶ │  SQLite + JSON   │
-│  (NiceGUI)   │ ◀── 事件 deque ────── │     (Store)      │
-└──────────────┘     maxlen=200        └──────────────────┘
-                                              ▲ 只写
-┌─────────────────────────────┐               │
-│  工作线程池 (默认 2，可配 1~6) │ ──────────────┘
-│  download / convert 可重叠     │
-│  transcribe 串行（引擎锁）     │
-└─────────────────────────────┘
+```text
+queued → downloading → converting → transcribing → saving → done
+                     ↘           ↘            ↘        ↘
+                      failed / cancelled（任一步都可）
+paused ⇄（恢复后回到 queued）
 ```
 
-### 5.2 为什么下载并发、转写串行
+状态落库（`history.db`），所以进程被杀也能知道上次停在哪；`recover_paused()` 在启动时
+把 `paused` 恢复成 `queued`。
 
-下载和转码是 **I/O 与 CPU 密集混合**，多路并行能显著提升吞吐：任务 A 在转写时，任务 B 可以同时下载，A 结束后 B 的音频已就绪，几乎无缝。
+### 2.3 断点续跑
 
-转写必须串行：多个任务同时往同一块显卡塞数据会打满显存触发 `CUDA out of memory`，全部失败。串行在总吞吐上反而更优。
+- 音频与 WAV 按媒体 ID 缓存在输出目录的中间区，重跑直接复用。
+- 中间产物（分片、临时 wav）处理完立即删，不占盘。
+- 重跑同一条会 `UPSERT` 覆盖，不会堆重复记录（主键 = 平台内媒体 ID）。
 
-### 5.3 三层锁
+### 2.4 并发模型
 
-| 锁 | 位置 | 保护对象 |
+| 阶段 | 并发 | 原因 |
 |---|---|---|
-| `_model_lock` | `Pipeline` | `_transcriber` 实例的懒加载 / 替换（设置变更时重建） |
-| 引擎 `self._lock` | 各 transcriber | `transcribe()` 串行化，确保同一时刻只有一个任务占模型 / 显存 |
-| double-checked lock | 各引擎 `load()` | 判空 + 加载整体在锁内，杜绝冷启动双加载 |
-
-`_model_lock` 只在**拿到引擎引用**时短暂持有；in-flight 转写持有的是自己的引用，因此设置变更不会打断正在跑的任务。
-
-### 5.4 队列去重机制
-
-```python
-self._scheduled: set[str] = set()   # media_id 已在队列中
-```
-
-- `_enqueue(task)` 统一入队，入队时 `add`。
-- worker 取到任务时 `discard`（表示"已不在队"）。
-- 三处入队（`submit_local` / `submit_prepared` / `rerun`）全部走 `_enqueue`。
-
-**解决的真实 bug**：曾出现「submit_prepared → start()」与「submit_prepared 自身入队」双重入队，同一个 media_id 被两个 worker 同时处理，一个删了 wav 另一个就 `FileNotFoundError`。`_scheduled` 是唯一裁决点。
-
-### 5.5 单实例保护
-
-两个进程同时处理同一批任务会互相删中间文件。保护机制：
-
-```python
-name = f"Local\\bili-transcriber-{sha1(str(DATA_DIR))[:12]}"
-h = ctypes.windll.kernel32.CreateMutexW(None, False, name)
-if ctypes.get_last_error() == ERROR_ALREADY_EXISTS (183):
-    webbrowser.open(existing_url)   # 打开已有窗口
-    return                          # 自己退出
-```
-
-命名里带 `DATA_DIR` 的哈希，因此**不同数据目录可以并行跑多个实例**（比如一个正式版一个测试版），同目录则互斥。
-
-**子进程必须排除在外**。NiceGUI 会 spawn 子进程并重跑模块的 `__mp_main__` 分支，子进程再走一次 `main()` 必然抢不到互斥体，然后按"已有实例"分支**又开一个浏览器标签页**（真机日志每次启动都多一行 `__mp_main__: 已有实例在运行,本进程退出`）。因此判定顺序里先查进程身份：
-
-```python
-if sys.platform != "win32" or multiprocessing.current_process().name != "MainProcess":
-    return True      # 子进程不是"第二个实例",既不抢互斥体也不开浏览器
-```
-
-### 5.6 模型空闲卸载
-
-`MODEL_IDLE_UNLOAD_SEC = 600`。队列空且超过 10 分钟无任务时卸载模型，释放显存 / 内存。下次任务提交自动重新加载（懒加载）——只损失一次冷启动时间。
-
-对 CLI 一次性进程无所谓，对长时间挂机的桌面端能省下 1.6 GB 内存。
-
----
-
-## 6. 状态机与任务恢复
-
-### 6.1 状态集合（单一来源）
-
-```python
-# app/pipeline.py
-ACTIVE_STATUSES = frozenset({
-    "queued", "downloading", "converting", "transcribing",
-    "extracting", "saving", "paused",
-})
-TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
-```
-
-`app/ui/state.py` 直接 `from app.pipeline import ACTIVE_STATUSES` 再导出。以前两处各写一份，改了一处忘了另一处就会让「进行中」判断漂移——现在物理上不可能。
-
-### 6.2 状态流转
-
-```
-queued
-  └→ downloading ──→ converting ──→ transcribing ──┬→ saving → done
-                                     │              │
-                                     └→ extracting ─┘   (开启讲义时)
-                     任意阶段 ──→ failed / cancelled
-                     任意阶段 ──→ paused ──→ (resume) 回到原阶段
-```
-
-### 6.3 启动恢复
-
-`Pipeline.start()` 除了拉起 worker，还做**遗留任务恢复**：
-
-```python
-for job in self.store.list_jobs():
-    if job.media_id in self._scheduled:      # 已在队，别重复
-        continue
-    if job.status not in ACTIVE_STATUSES:    # 只看进行中
-        continue
-    job.status, job.progress, job.error, job.finished_at = "queued", 0.0, "", ""
-    self.store.upsert_job(job)
-    self._enqueue(Task(kind=..., url=job.url, media_id=job.media_id))
-    recovered += 1
-```
-
-**为什么必须覆盖全部 ACTIVE_STATUSES 而不只是 queued / paused**：实测 `--no-wait` 提交后 CLI 进程退出，任务永久停在 `transcribing`，桌面端再也不理它。修成恢复全部进行中状态后，同样的场景能自动续跑成功。
-
-### 6.4 重复提交的语义
-
-`submit_prepared` / `submit_local` 遇到已在处理中的 media_id 时，**不重新入队**，返回：
-
-```python
-{"media_id": ..., "title": ..., "status": "running", "stage": <当前状态>}
-```
-
-调用方（CLI / MCP / UI）据此可以区分「新提交」和「已经在跑」。这也是防止双 worker 抢同一任务的第一道闸。
-
----
-
-## 7. 模块职责
-
-### 7.1 `paths.py` — 路径解析
-
-```python
-def app_root() -> Path   # frozen = exe 所在目录；源码 = 项目根
-def data_dir() -> Path   # app_root()/data
-```
-
-**CLI / MCP 必须与 GUI 指向同一份 `data/`**，否则 AI 调用看不到桌面端的历史和设置，会读写两套互相独立的数据库。
-
-### 7.2 `main.py` — 启动与 UI 装配
-
-`main()` 的执行顺序（顺序即正确性）：
-
-1. spawn 子进程早退（`_is_spawn_child()` → `return`）
-2. `setup_logging()`
-3. 解析端口（`BILI_PORT`，默认 8765）
-4. `_resolve_ui_mode()` 定界面形态 → 单实例检查 → 失败则**唤醒已有窗口**并 `return`
-5. `pipeline.start()`（含遗留任务恢复）
-6. 托盘 → 原生窗口数据目录 → 窗口就绪看门狗 → `ui.run()`
-
-单实例检查必须在 `pipeline.start()` **之前** —— 否则第二个实例会先把任务标成 queued 再被踢，留下脏状态。
-
-**为什么第 1 步要早退**：源码模式下 `multiprocessing` 用 `runpy` 以 `__mp_main__` 重执行本模块，也会命中入口守卫；此时若继续跑 `main()`，就会再起一个服务、再抢一次端口。冻结版由 `multiprocessing.freeze_support()` 先接住 `--multiprocessing-fork`，根本走不到这里，所以早退对打包版无副作用。
-
-**界面形态（`_resolve_ui_mode`）**
-
-| 条件 | 结果 |
-|---|---|
-| `BILI_FORCE_BROWSER=1` | `(native=False, show=True)` |
-| `BILI_FORCE_NATIVE=1` | `(native=True, show=False)` |
-| win32 且检测到 WebView2 | `(native=True, show=False)` — **默认** |
-| 其他 | `(native=False, show=True)` |
-
-陷阱：`nicegui.ui.run()` 内部有
-
-```python
-if window_size: native = True
-```
-
-也就是说**只要传了 `window_size` 就强制原生窗口**，`native=False` 会被静默覆盖。项目早期"默认浏览器模式"的开关因此从未生效过——`use_native=False` 打印出来是假的，实际一直是原生窗口。现在只在 `use_native` 为真时才传 `window_size`。
-
-**两次双击的行为**（`_activate_existing_window`）
-
-第二个进程失败于互斥体后，不再 `webbrowser.open` 后直接 `return`（用户看到的"一点就弹浏览器、然后自己没了"），而是**轮询 `FindWindowW` 最多 30 秒**，等到窗口就 `ShowWindow(SW_RESTORE)` + `SetForegroundWindow`，然后自己退出。轮询是必须的：冷启动要导入 torch/transformers，窗口 10–20 秒后才出现，立刻判定"没有窗口"就会错走浏览器分支。确实唤不到窗口且当前是原生模式时，弹 `MessageBoxW` 告知，不再开浏览器。
-
-**WebView2 用户数据目录（`_configure_native_window`）**
-
-pywebview 在 `private_mode`（默认）下把 WebView2 的 `UserDataFolder` 设成
-
-```python
-cache_dir = tempfile.TemporaryDirectory().name   # webview/platforms/winforms.py
-```
-
-`TemporaryDirectory()` 实例**当场就被回收**，其终结器把目录删掉，而 WebView2 仍在往里读写 —— 渲染进程崩溃 → 窗口消失 → NiceGUI 的 `check_shutdown` 线程发现窗口进程已死 → `core.stop_and_exit()`，于是**整个程序静默退出，退出码 0，日志里一个字都没有**。这就是"开着几分钟自己没了"的根因。
-
-修法：`ui.run()` 之前把 `storage_path` 固定下来：
-
-```python
-nicegui_app.native.start_args["storage_path"] = str(DATA_DIR / "webview2")
-```
-
-目录稳定不会被回收，顺带让不同安装目录的实例各用各的 profile，不再争抢同一个 WebView2 目录。
-
-**踩到的坑**：第一版写的是 `native.settings["storage_path"] = …`，开窗子进程立刻抛 `KeyError: "Cannot add new key 'storage_path'. Only existing keys can be modified."` —— `webview.settings` 是只允许改已有键的 `ImmutableDict`（`webview/util.py`），`start_args` 才是 `webview.start(**…)` 的入参。这个错误是真机跑出来的，不是推的。
-
-**窗口就绪看门狗（`_watch_native_window`）**：后台线程每秒查一次窗口是否存在，就绪时记下耗时；60 秒仍未出现则记 `ERROR` 并提示可用 `BILI_FORCE_BROWSER=1` 兜底。窗口态 exe 没有控制台，诊断信息只能进日志文件。
-
-UI 线程每 **0.6s** 轮询 `Store` 并消费事件 `deque(maxlen=200)`。
-
-### 7.3 `pipeline.py` — 核心编排
-
-| 方法 | 职责 |
-|---|---|
-| `submit(url)` | 提交链接（内部 probe 后转 `submit_prepared`） |
-| `submit_local(path)` | 提交本地文件（内容哈希作 media_id） |
-| `submit_prepared(entries)` | 提交已探测的条目列表，返回每条的受理结果 |
-| `_enqueue(task)` | 唯一入队点，维护 `_scheduled` |
-| `rerun(media_id)` | 重置状态并重新入队 |
-| `pause/resume/cancel` | 转调 `task_control` |
-| `apply_settings(settings)` | 热应用设置；worker 数变化时重建线程池 |
-| `prewarm()` | 后台线程加载模型 |
-| `maybe_unload_model()` | 空闲卸载 |
-| `stalled(media_id)` | 判断任务是否卡住（默认 60s 无进度） |
-
-### 7.4 `headless.py` — 服务层
-
-对外 API：`submit` / `status` / `list_jobs` / `wait` / `transcript` / `cancel` / `prewarm` / `get_settings` / `set_settings` / `close`。
-
-**三个关键设计：**
-
-**① `json_safe(value)`** — 递归把 `NaN` / `±Infinity` 转成 `None`。所有出站 JSON 都过它，且 `json.dumps(..., allow_nan=False)`。默认的 `allow_nan=True` 会写出裸 `NaN`，JS 侧 `JSON.parse` 直接报错。
-
-**② `_validate_settings(changes)`** — 白名单校验 `engine` / `device` / `compute_type`，`output_dir` 做**写探针**（实际创建目录 + 写临时文件）。硬错误抛 `ServiceError`；`cookie_file` / `model_dir` 不存在只返回 warning（可能稍后才创建）。
-
-**③ `_has_orphan(ids)`** — `wait()` 里检测「无存活 worker + 队列空 + 存在 queued」的组合，命中则返回 `{"stalled": True, "hint": "..."}` 而不是死等超时。这对应「CLI 提交了任务但本进程没在调度它」的真实场景。
-
-**④ `channel_block_reason(channel)`** — 读 `settings.json` 判断 `enable_cli` / `enable_mcp`，被关时返回一段可直接展示给用户的中文原因（含"怎么改回来"）。只读文件、不建 `Service`。
-
-**⑤ 已持久化 vs 本次生效** — `Service` 同时持有 `_persisted`（磁盘真相）与 `settings`（叠加了本次进程的临时覆盖）。`get_settings()` 报前者，并把临时覆盖单列在 `session_overrides` 里：
-
-```python
-data = asdict(self._persisted)
-if self._overrides:
-    data["session_overrides"] = dict(self._overrides)
-```
-
-原因：`transcribe(engine="sensevoice")` 只在本进程生效、不写盘。以前 `get_settings()` 回显被覆盖后的对象，AI 会据此告诉用户"我已把你的引擎改成 sensevoice"，其实磁盘上没变。
-
-`set_settings()` 改成了**读-改-写**：先重新读一遍磁盘，再套用本次改动的键。否则长驻的 MCP 进程会用启动时那份内存副本把用户在设置页刚改的开关覆盖回去 —— 这是"通道开关"这类安全语义字段上最不能容忍的失步。
-
-### 7.5 `cli.py` — 命令行
-
-**编码自适应（重要）**：
-
-```python
-def _dump_json(payload, indent=2):
-    safe = json_safe(payload)
-    text = json.dumps(safe, ensure_ascii=False, indent=indent, allow_nan=False)
-    try:
-        text.encode(_stream_encoding())      # 探测 stdout 能否表示
-    except (UnicodeEncodeError, LookupError):
-        text = json.dumps(safe, ensure_ascii=True, indent=indent, allow_nan=False)
-    return text
-```
-
-`_write()` 再兜一层 `backslashreplace`。
-
-**为什么必须这么做**：PyInstaller `console=False` 打包出的 exe，复用父进程管道，`sys.stdout.encoding` 取系统 ANSI 代码页 —— 中文 Windows 是 **GBK**。此时 `print('🎉')` 直接抛 `UnicodeEncodeError: 'gbk' codec can't encode character '\U0001f389'`，CLI 崩在最后一步。
-
-测法：`PYTHONIOENCODING=gbk` 跑一遍，确认输出仍是合法 JSON（ASCII 转义也能被 `JSON.parse` 解析）。
-
-**通道门禁与退出码**。`main()` 的顺序被刻意安排成：`--version` → `--mcp` 转交 → **门禁** → `setup_logging()` → 建 `Service`。门禁放在建 Service 之前，是因为通道关闭时不该去开数据库（否则白拿一把 SQLite 锁、白建一个 pipeline），测试 `test_cli_does_not_touch_database_when_disabled` 直接断言工厂没被调用。
-
-| 码 | 含义 |
-|---|---|
-| 0 | 成功 |
-| 1 | 任务失败 / 执行错误（含参数值非法） |
-| 2 | 参数错误（缺值、互斥冲突） |
-| 3 | 通道已在设置页关闭 |
-
-`--version` 不受门禁影响 —— 排查问题时至少还能拿到版本号。
-
-**断管不抛栈**。`cli ... | head -1` 会让 stdout 提前关闭，Python 默认抛 `BrokenPipeError`，退出码变 1，脚本误判成"任务失败"。`_write()` 捕获 `(BrokenPipeError, OSError, ValueError)` 后把 `sys.stdout` 指向 `devnull`，同时避免解释器退出时再 flush 一次报 `Exception ignored in: <_io.TextIOWrapper>`。
-
-**输出被管道接管时强制 UTF-8**。`main()` 的第一行是 `_configure_output_encoding()`：`stdout`/`stderr` 若不是 tty（被重定向或作为子进程管道），就 `reconfigure(encoding="utf-8", errors="replace")`；仍是终端则保持控制台代码页。
-
-为什么非改不可：打包版自带运行时，**不继承调用方的 `PYTHONUTF8` / `PYTHONIOENCODING`**，中文 Windows 下 stdout 编码取系统 ANSI 代码页 `cp936`。此时 JSON 里的中文按 GBK 写出 —— 本机 `subprocess.run(..., text=True)` 用 locale 解码能读，但按 UTF-8 解析的客户端（Node `child_process`、显式 `encoding="utf-8"` 的 Python 调用方）会得到乱码甚至 `UnicodeDecodeError`，而这正是 CLI 通道的主要使用者。
-
-早期实现只在"编码装不下"时降级 `ensure_ascii=True`（`_dump_json`），但 **GBK 装得下常用汉字，降级分支根本不会触发** —— 输出于是长期是"人能看、机器读错"的 GBK。改流之后 `_stream_encoding()` 返回 `utf-8`，两条路径终于一致。
-
-终端不动是有意的：`cmd.exe` 默认代码页直接写 UTF-8 会花屏，人读的那一份得顺着控制台。
-
-### 7.6 `mcp_server.py` — MCP 服务端
-
-手写 JSON-RPC 2.0 子集，不引第三方 SDK（降低打包体积与依赖风险）。
-
-支持方法：`initialize` / `tools/list` / `tools/call` / `notifications/initialized` / `ping`。
-
-**健壮性处理：**
-
-| 问题 | 处理 |
-|---|---|
-| 参数类型不可靠（AI 常把 `limit` 传成字符串） | `_arg_int` / `_arg_num` / `_pick` 容错转换；`"10"` 能解析，`"abc"` 给可读错误 |
-| 客户端发批量请求（JSON 数组） | 逐条 `handle()` 后**展平**为单个响应数组 |
-| 结果里有 NaN | `_tool_result()` 统一 `json_safe` + `allow_nan=False` |
-| 被非管道方式启动（stdin/stdout 为 None） | `_reopen_null_streams()` 写日志并返回 `False` → `main()` 返回 1 |
-| 客户端无条件拉 `resources/list` / `prompts/list` | 回空清单而不是 `-32601`：个别客户端拿到方法不存在会把整个服务标记为不可用 |
-| 任何遗留 `print` / 第三方库输出 | `_isolate_stdout()`：协议句柄存局部变量，`sys.stdout` 改指 stderr |
-| 客户端塞进非 UTF-8 字节 | stdin `errors="replace"`；`serve()` 捕获解码/读错误后结束会话而不是抛栈 |
-| 通道被设置页关闭 | `main()` 在建 Service 之前拒绝，原因写 stderr，**stdout 保持干净**，退出码 1 |
-
-**为什么 stdout 必须隔离**：MCP stdio 的帧就是"一行一个 JSON"。只要有任意一行非 JSON 混进 stdout，客户端就会 `JSON.parse` 失败或直接断开连接 —— 排查起来极难，因为是自己代码里一句遗留的 `print`。把协议通道单独摘出来是 LSP / MCP server 的通行做法：
-
-```python
-proto = sys.stdout          # 只给协议用
-sys.stdout = sys.stderr     # 其余输出(含日志、库的 print)统统去 stderr
-serve(server, sys.stdin, proto)
-```
-
-**为什么非法字节不能抛栈**：一行坏字节把进程打崩,客户端看到的是"服务意外退出",而真正原因(编码)藏在 traceback 里。实测:`serve()` 原来用 `iter(stdin.readline, "")`,遇到 `ÿþ` 直接 `UnicodeDecodeError`;改成显式 `readline()` + `try/except` 后,坏行降级成 `-32700 Parse error` 响应,会话继续。
-
-### 7.7 `downloader.py` — 下载编排
-
-- **平台识别**：按域名分流 `bilibili / youtube / douyin / xiaohongshu / kuaishou`，未知平台按 B 站兼容处理；media_id 前缀 `yt_` / `dy_` / `xhs_` / `ks_`。
-- **短链安全**：b23.tv 等走**域名白名单** + **DNS-rebinding 防护**（解析 IP 复核）后才跟随重定向。
-- **Cookie / 代理**：`cookiefile`（cookies.txt）优先于 `cookiesfrombrowser`；浏览器名不在 `SUPPORTED_BROWSERS` 时忽略，避免 YoutubeDL 构造抛错。
-- **探测缓存**：`_reach_cache` 在代理变更后清空重测。
-- **微信视频号主动拦截**：没有免登录直链，直接给出改用本地上传的提示，而不是让它下载失败。
-
-### 7.8 `netcheck.py` — 网络与 Cookie 自动检测
-
-设置页「一键检测」与「测试连接」的后端。**只读本机数据、不改设置**（写回由 UI 层决定），
-所有异常降级成可读文案：某个浏览器库损坏不影响整体结果。
-
-| 能力 | 入口 | 实现要点 |
-|---|---|---|
-| 浏览器扫描 | `detect_browsers()` | 按 `LOCALAPPDATA`/`APPDATA` 枚举 Chromium 系 + Firefox 配置；只读 `(host_key, name, expires_utc)` 元信息，**不解密 Cookie 值** |
-| cookies.txt 扫描 | `detect_cookie_files()` | 项目目录 / `data/` / 下载 / 桌面 / 文档里找名字含 `cookie` 的 `.txt`，解析 Netscape 格式 |
-| 代理探测 | `detect_proxies()` | 系统代理（注册表）→ 环境变量 → 常见本机端口（7890/7897/10809…）TCP 探测，再用 YouTube 验证可用性 |
-| 网络探测 | `probe_network()` | 5 平台并行 HTTPS 探测 + 代理验证，硬截止时间封顶耗时 |
-| 建议 | `build_report()` | 按「覆盖平台数」选源：数量相同优先 cookies.txt；识别不到就保留用户现值，绝不清空 |
-| 配置测试 | `test_configuration()` | 真联网 + 真读 Cookie 值，B 站走 `x/web-interface/nav` 校验 `isLogin`/`uname` |
-| 导出 | `export_browser_cookies()` | 经 yt-dlp 解密并写 Netscape 文件（含凭据，只在用户点按钮时生成） |
-
-**为什么检测阶段不解密 Cookie**：判断"某平台是否登录"只需要 Cookie 的域名、名字、有效期，
-读元信息不碰 DPAPI 解密，快且不需要浏览器配合；只有「测试连接」和「导出」才需要解密。
-
-**浏览器运行时的硬限制**：Chromium 系在运行时对 `Cookies` 库持有独占锁，
-`shutil.copy2` 直接 `WinError 32`。此时 `BrowserInfo.running=True`，UI 明确提示"关闭浏览器后重试或改用 cookies.txt"，
-绝不让"检测失败"看起来像程序出错。
-
-**两个必须避开的坑**（都踩过）：
-
-1. `urllib` 默认 opener 会读环境变量代理 —— 直连探测必须显式传 `ProxyHandler({})`，
-   否则"直连"其实走了代理，结果会撒谎。
-2. `urllib`/`socket` 的 timeout 是"每个地址每次操作"的上限，被墙域名解析出多个 IP 时会连续等好几个 timeout
-   （实测 YouTube 配 3.5s 要跑 7.2s）。因此探测统一用 `future.result(timeout=…)` 做**硬截止**，
-   DNS 另给 2s 上限，且**走代理时不解析本地 DNS**（由代理解析，本地污染不代表代理不可用）。
-
-### 7.9 三转写引擎
-
-| 模块 | 后端 | 时间戳策略 | 语言映射 |
+| 下载 / 转码 | 可并行（`workers` 1~6） | 网络与 IO 吃不满 CPU |
+| 转写 | **串行** | GPU 显存只够一个模型；并发反而 OOM |
+| 写盘 | 随 worker | 无冲突（每条独立文件） |
+
+`pipeline.apply_settings()` 在空闲时重建线程池；忙时跳过，避免新旧线程池并存。
+判定"忙"要同时看 `running + paused` —— 暂停的工作线程可能正阻塞在 `wait_if_paused`，
+只看 running 会漏。
+
+### 2.5 模型缓存与卸载
+
+- 缓存键：`(model_size, device, compute_type, language, vad)`；键不变就不重载。
+- 三个引擎的 `load()` 都是 double-checked locking（并发双加载已修）。
+- 空闲 600 秒无任务 → `maybe_unload_model()` 释放显存；下次任务重新加载。
+- 保存设置后触发 `prewarm()` 预热（幂等、忙时跳过），并做 stale 校验：加载完成时
+  若 `_transcriber` 已换实例，立即 `unload()`，防止泄漏。
+## 3. 模块地图
+
+| 模块 | 行数 | 职责 | 关键点 |
 |---|---|---|---|
-| `transcriber.py` | faster-whisper / ctranslate2 | 原生 | whisper 代码 |
-| `qwen_transcriber.py` | qwen-asr (torch) + ForcedAligner | aligner 对齐；缺失时按时长降级估算 | `_map_qwen_language()` whisper→全名，未知回退 auto |
-| `sensevoice_transcriber.py` | sherpa-onnx int8 | token 级时间戳聚合 `_tokens_to_segments()` | `_map_sensevoice_language()` |
+| `main.py` | 446 | 进程入口 + 界面分发 | exe 默认 GUI，必须 `--cli` 才进 CLI；`_is_spawn_child()` 前置放行 NiceGUI 子进程 |
+| `ui/pages.py` | 1006 | 三个页签 + 设置页 | 动画走 CSS class；Quasar `loading` 会吃掉按钮文案，改用 `set_text+disable` |
+| `ui/helpers.py` | 402 | UI 辅助 | `_notify()` 安全包装（托盘线程无 UI 上下文时不崩） |
+| `ui/state.py` | 61 | 界面状态 | 0.6 s 轮询 Store + 事件 deque |
+| `pipeline.py` | 784 | 单线程编排 | 状态机 / 断点续跑 / 预加载 / 空闲卸载 / 控制位 |
+| `downloader.py` | 573 | 下载编排 | 平台识别、短链、SSR、**浏览器 Cookie 桥接**、可达性缓存 |
+| `converter.py` | 189 | FFmpeg 转码 | 16 kHz 单声道 WAV；优先随包静态 ffmpeg |
+| `transcriber.py` | 239 | Whisper 引擎 | CUDA 下 BatchedInferencePipeline，批量失败回退逐段 |
+| `qwen_transcriber.py` | 466 | Qwen3-ASR 引擎 | 分组批量；结果数不符整批回退 |
+| `sensevoice_transcriber.py` | 265 | SenseVoice 引擎 | sherpa-onnx int8；token 级时间戳聚合 |
+| `writers.py` | 178 | 产物写盘 | SRT / TXT / MD / notes；原子写（临时文件 + rename） |
+| `store.py` | 246 | SQLite | `busy_timeout=5000`；`DEFAULT_SETTINGS` 是设置的唯一真相 |
+| `headless.py` | 505 | 服务层 | 通道开关守卫、设置校验、搜索、`check_network` 所需数据 |
+| `cli.py` | 393 | 命令行 | 34 个选项；非 tty 强制 UTF-8；BrokenPipe 自愈 |
+| `mcp_server.py` | 640 | MCP stdio | 11 工具；`_isolate_stdout()` 防 print 污染协议帧 |
+| `mcp_http.py` | 487 | MCP HTTP | 仅绑 127.0.0.1；会话 TTL 30 min；Origin 白名单；Bearer token |
+| `agent_setup.py` | 390 | 8 客户端配置 | DSH 拒绝直写；Codex 只写文档化 TOML 键；JSONC 给可行动报错 |
+| `netcheck.py` | 1218 | 网络与 Cookie 检测 | 元信息/值/锁三态分离；探测硬截止；`ProxyHandler({})` |
+| `cookiebridge.py` | 735 | Cookie 解密桥 | 最小 profile 复制 + 无窗口实例 + 标准库 WebSocket 走 CDP |
+| `keyframes.py` | 288 | 关键帧 | 讲义截图；按场景变化挑帧 |
+| `kuaishou.py` | 141 | 快手解析 | 自研分享页解析（yt-dlp 无该提取器） |
+| `models.py` | 257 | 模型管理 | 外置目录、完整性校验、下载（镜像/自愈） |
+| `hardware.py` | 195 | 硬件探测 | CUDA 可用性、显存、设备选择 |
+| `gpu_runtime.py` | 118 | 运行时注册 | 把 nvidia 包的 bin 目录加进 PATH |
+| `paths.py` | 21 | 路径 | 冻结时以 exe 目录为根；源码以项目根为根 |
+| `task_control.py` | 63 | 控制位 | 取消/暂停标志，提交时清位防"秒杀" |
+| `tray.py` | 98 | 托盘 | on_open 唤回窗口而非开浏览器 |
+| `native_dialog.py` | 110 | 原生对话框 | 文件选择（WebView 里不能用浏览器 file picker） |
+| `ffmpeg_bin.py` | 74 | ffmpeg 定位 | 随包静态版优先 |
+| `logging_setup.py` | 59 | 日志 | `%LOCALAPPDATA%\Bili Note\logs`，2 MB 轮转留 3 份 |
 
-共性：
+## 4. 三个转写引擎
 
-- **懒加载 + 缓存键** `(model_size, device, compute_type, language, vad)`，变了才重载。
-- **VAD 自愈**：Silero VAD 滤除全部语音（纯音乐）时自动关闭重试一次。
-- **Qwen 分块**：长音频切 60s 块逐块推理，`on_event` 上报「第 i/n 块」进度。
-
-### 7.10 `writers.py` — 落盘
+共同契约（`pipeline` 只认这三件事）：
 
 ```python
-def _write_text_retry(path, text, attempts=6):
-    tmp = path.with_name(f".{path.name}.tmp")
-    for i in range(attempts):
-        try:
-            tmp.write_text(text, encoding="utf-8")
-            os.replace(tmp, path)      # 原子替换
-            return path
-        except PermissionError:
-            time.sleep(0.2 * (i + 1))  # 线性退避
-    raise
+load(key) -> None          # 幂等；double-checked locking
+transcribe(wav, language, progress) -> list[Segment]
+unload() -> None           # 持锁；幂等
 ```
 
-先写 `.tmp` 再 `os.replace`，配 6 次 `PermissionError` 退避。解决两个真实问题：杀毒软件扫目录时短暂锁定文件、用户正用别的程序打开产物。**不会留下半截文件**。
-
-### 7.11 `models.py` / `gpu_runtime.py`
-
-- `default_model_dir()` → `%LOCALAPPDATA%\Bili Note\models`；`resolve_model_dir()` 支持自定义。
-- `scan_models()` / `describe_models()` 按三引擎特征文件判断完整性，驱动设置页「检测模型」。
-- `gpu_runtime` 在 `%LOCALAPPDATA%\Bili Note\gpu` 下按 `nvidia/{cublas,cudnn,cuda_runtime,cuda_nvrtc}/bin/` 找 17 个 CUDA DLL（`_dll_root()` 以 `cublas64_12.dll` 是否存在判定可用，兼容扁平布局），`add_dll_directory` + PATH 双注入后 ctranslate2 才能加载。
-  - **为什么必须双注入**：ctranslate2 以 `CUDA_DYNAMIC_LOADING=ON` 编译，延迟加载 cuBLAS 不走 Windows 安全搜索模式，只注册 `add_dll_directory` 时 ctypes 能加载但转写仍失败。
-  - **句柄不能丢**：`add_dll_directory` 返回的句柄被 GC 回收后搜索路径立即失效（表现为模型加载成功、转写时才崩），所以用 `_dll_handles` 长期持有。
-  - **注册幂等**：`_registered_dirs` 防止每次转写都重复前置 PATH 导致无限膨胀。
-- `ensure_gpu_or_cpu()` 缺失包时静默回退 CPU，并提前 `ctypes.WinDLL("cublas64_12.dll")` 验证可加载，避免转写中途才崩。
-
-### 7.12 `keyframes.py` — 双后端
-
-| 后端 | 判定方式 | 适用 |
+| 引擎 | 批量策略 | 失败回退 |
 |---|---|---|
-| ffmpeg（优先） | `select='gte(scene,0)'` + `metadata=print` 流式解析每帧分数，阈值 0.11 | 快，几乎总能成功 |
-| PyAV（回退） | 64×36 灰度 MAD > 15 | ffmpeg 不可用时 |
+| Whisper | CUDA 下 `BatchedInferencePipeline(_BATCH_SIZE=8)` | 批量异常 → 整段改逐段 |
+| Qwen3-ASR | 按 `_BATCH_CHUNKS=4` 分组（原生支持 List[audio]） | 结果数不符/异常 → 丢弃半成品整批回退 |
+| SenseVoice | 单段（模型本身轻） | 无 |
 
-公共策略：首帧必截；切换后 0.4s 截取；最小间隔 5s；上限 400 帧。`KeyframeError` 与用户取消不回退，直接上抛。
+时间戳来源不同：Whisper 原生；Qwen 用 ForcedAligner，失败时按字数比例估算；SenseVoice 用 token 级
+时间戳再聚合成段。
 
-### 7.13 `ui/` 三件套
+`transcribe()` 期间 `pipeline` 全程持锁 —— 这是"转写串行"的实现方式，不是靠线程池大小。
 
-- `state.py` — 模块首次导入时创建单例（store / settings / pipeline / events），与拆分前 `main.py` 行为一致。
-- `pages.py` — 四页签布局。
-- `helpers.py` — 纯动作函数，不含布局；`_launch_explorer` 等 UI 名字可被测试 monkeypatch。
+## 5. 网络与 Cookie 子系统
 
-**表格行级事件的坑**：NiceGUI `$emit('open-path', path)` 后 `e.args` 是 `[path]` 列表，需 `_first_arg(e)` 解包。explorer 的 `/select,"path"` 必须用引号包裹，否则含空格的路径被截断。
+### 5.1 三条检测线（`netcheck`）
 
-### 7.14 `mcp_http.py` — MCP Streamable HTTP 传输
-
-给**拉不起子进程**的调用方用：DSH 的 streamable-http 连接、容器、浏览器内 Agent。协议处理完全复用 `MCPServer.handle`，stdio 与 HTTP 两条通道工具与错误语义一致。
-
-| 能力 | 说明 |
-|---|---|
-| 路由 | `POST /mcp`（JSON 或 SSE 看 Accept）、`GET /mcp` 恒 405（不提供服务端推送）、`DELETE /mcp` 204 结束会话、`GET /healthz` 探活 |
-| 会话 | `initialize` 时建（`Mcp-Session-Id`），闲置 30 分钟回收、上限 64 个（满了淘汰最旧）；业务状态在 Service/DB，回收无副作用 |
-| 安全默认 | 只绑 `127.0.0.1`；Origin 白名单（非本机 403，防 DNS rebinding）；默认零 CORS；可选 Bearer token（`BILI_MCP_HTTP_TOKEN`） |
-| 请求护栏 | 无 Content-Length 报 400（不支持 chunked）；8 MB 体积上限；坏 JSON `-32700`；未知会话 404 提示重新 initialize |
-
-**两个必须记住的坑（工具闭环实测抓出）：**
-
-1. **`start()` 必须自己起线程跑 `serve_forever()`** —— 标准库只构造 server 对象，没人 accept，客户端表现为"请求挂死但服务明明在监听"。
-2. **`server_bind` 默认调 `socket.getfqdn()` 反向解析** —— DNS 被代理接管的机器上服务启动即挂几十秒。`_QuietHTTPServer` 覆盖之，`server_name` 用字面 IP。
-
-另外：CLI 是多线程服务器，而 Service 的 SQLite 连接非并发安全 → `_handle_lock` 把工具调用串行化（与 stdio 天然串行语义一致）。
-
-### 7.15 `agent_setup.py` — 各 AI 客户端接入配置生成
-
-同一个 MCP 服务，八种客户端的配置格式各不相同 —— 这层把已知格式固化：
-
-| 客户端 | 格式 | 落地方式 |
+| 线 | 入口 | 是否解密 |
 |---|---|---|
-| WorkBuddy | JSON `mcpServers` | `--write` 直写 `~/.workbuddy/mcp.json` |
-| DSH | `tables.connections` 条目 | **拒绝直写**（连接表由界面托管，直写会破坏结构）；生成可粘贴的 streamable-http / stdio 条目 |
-| Codex | TOML `[mcp_servers.*]` | `--write` 直写；只写文档化键（`startup_timeout_sec=300`），**想当然的未知键会让整个 config.toml 起不来** |
-| Claude / Cursor / VS Code / Tare / generic | JSON | `--write` 或手动粘贴 |
+| 浏览器扫描 | `detect_browsers()` | 否，只读 `(host_key, name, expires_utc)` |
+| cookies.txt 扫描 | `detect_cookie_files()` | 否（文件本来就是明文） |
+| 网络探测 | `probe_network()` | —（系统代理 → 环境变量 → 常见端口 → YouTube 验证） |
 
-设计原则：**只生成、不擅自改用户配置**。写入必须显式 `--write`、先备份 `.bak`、只动 `bili-transcriber` 条目；`merge_toml` 按 section 边界替换，用户的 provider/model 等配置原样保留。`resolve_executable` 区分冻结态（`xxx.exe --mcp`）与源码态（`python -m app.mcp_server`）。`doctor()` 聚合本机客户端探测与常见错误，路径一律走 `app.paths.data_dir()`（写死任一形态的路径都会在另一种形态下误报）。
+`build_report()` 按「覆盖平台数」选源：数量相同优先 cookies.txt；识别不到就保留用户现值，绝不清空。
 
----
+### 5.2 三态语义（关键设计）
 
-## 8. 数据契约
-
-### 8.1 设置（16 项）
-
-```jsonc
-{
-  "output_dir": "output",         // 相对 app_root 或绝对路径
-  "model_size": "large-v3-turbo",
-  "device": "auto",               // auto / cuda / cpu
-  "compute_type": "auto",         // auto / float16 / int8_float16 / int8
-  "language": "",                 // 空 = 自动
-  "keep_audio": true,
-  "vad": true,
-  "notes": false,
-  "engine": "whisper",            // whisper / qwen3-asr / sensevoice
-  "model_dir": "",                // 空 = 默认目录
-  "cookies_from_browser": "",
-  "cookie_file": "",
-  "proxy": "",
-  "workers": 2,                   // 1~6
-  "enable_cli": true,             // CLI 通道开关(仅桌面端可改)
-  "enable_mcp": true              // MCP 通道开关(仅桌面端可改)
-}
-```
-
-后两项**不在 `OVERRIDABLE_SETTINGS` 里**：`--set` 与 MCP 的 `update_settings` 都会拒绝它们。理由不是洁癖 —— 一旦允许写，一个被提示注入的 AI 就能先 `update_settings(enable_mcp=true)` 长期留在机器上，或反过来把自己锁死来制造"服务坏了"的假象。权限边界放在人这一侧。
-
-读取方（`channel_block_reason`）直接读 `settings.json` 而不构造 `Service`：通道关闭时不该去开数据库、白建 pipeline。解析失败时按默认值放行 —— 这道开关用于收敛外部调用面，不是抗篡改边界（能改文件的人本就能改回来），而把配置搞坏的用户若连 CLI 都进不去反而更难自救。
-
-### 8.2 任务记录（SQLite `jobs` 表）
-
-主键 `media_id`，UPSERT 写入。字段：`media_id` / `url` / `title` / `status` / `progress` / `error` / `source_type` / `output_dir` / `created_at` / `finished_at`。
-
-`source_type` 决定恢复时用 `local` 还是 `prepared` 任务类型 —— **恢复 prepared 而不是 url**，避免多 P 视频在恢复时被重新 probe 成整批，把用户单独跑的那一 P 又拉回队列。
-
-### 8.3 输出目录与文件名规则
-
-规律集中在两处，改任意一处都会影响全部产物命名：
-
-**目录**（`Pipeline._job_dir`）：
+"值读不到" ≠ "登录态读不到"。`test_configuration()` 返回四元组：
 
 ```python
-folder = info.playlist_title or info.title           # 合集优先用整体标题
-name = _safe_name(folder) if not info.bv else f"{info.bv}_{_safe_name(folder)}"
-if unique_suffix:                                     # 本地任务用 media_id 去重
-    name = f"{name}_{_safe_name(unique_suffix)}"
+(values, states, metadata, error)
 ```
 
-- `info.bv` 由 `_bilibili_id()` 取下划线前部分，**已剥掉 `_p2` 后缀** —— 所以同一合集的所有分 P 落进同一个目录。
-- 本地文件 `info.bv` 为空，`unique_suffix = media_id`（`local_<sha1>`），因此目录是 `{文件名}_{hash}`，同名不同内容不会撞。
+| 情形 | metadata | 平台行状态 | report.ok |
+|---|---|---|---|
+| 值拿到了 | dict | present / verified | 可以是 True |
+| 值没拿到、元信息在 | dict + error | **present**（附"值加密读不到"） | **False** |
+| 连元信息都没有 | None | unreadable（五行共用一句短文案） | False |
 
-**文件名主干**（`downloaders.output_stem`）：
+> 最后一行那条 `report.ok=False` 是审查抓出来的：把"登录态在"当成"配置可用"是假阳性 ——
+> 用户看到绿灯去下载，结果失败了，还找不到原因。
 
-```python
-stem = _safe_name(info.title) or info.media_id
-if info.total_parts > 1:
-    stem = f"{stem}_P{info.part:02d}"
+### 5.3 Chrome 127+ 的 v20（应用绑定加密）
+
+**问题**：Cookie 密文前缀从 `v10` 变成 `v20`，密钥由 elevation service 包裹且绑定原始
+`user-data-dir` 路径。yt-dlp 只实现 v10，遇 v20 一律 `Failed to decrypt with DPAPI`（issues/10927）。
+
+**方案**（`cookiebridge.py`）：
+
+```text
+复制 Local State + Cookie 库到临时目录
+   → 起 --headless=new 临时实例（--user-data-dir=临时候本）
+   → 标准库手写 WebSocket 走 CDP Network.getAllCookies
+   → 浏览器自己解密，返回明文 JSON
+   → 杀进程 + 删临时目录
 ```
 
-`total_parts > 1` 时才加 `_P01` 后缀，因为合集里各 P 标题常常重复——不加会互相覆盖。单 P 保持原名以兼容既有产物。
+**实现细节（都踩过）**：
 
-`_safe_name()` 把 `<>:"/\|?*` 替换成 `_`，去尾部空格与点，并截断到 80 字符。
+1. **WebSocket 帧必须带 mask** —— 不带 mask 服务端立刻断开，现象是握手 101 之后 `closed`。
+   服务端帧则不带 mask，别"对称"处理。
+2. **布局要还原** —— `Local State` 在 User Data 根，Cookie 库在 `<root>/<Profile>/Network/Cookies`。
+   只复制两个文件但不还原这层，浏览器找不到库，读出 0 条。
+3. **多 profile 必须指名** —— 原路径策略要传 `--profile-directory=<名>`，否则 Chrome 一律回
+   Default，读到别人的登录态（静默错误）。
+4. **锁判定用复制探测** —— 能复制 = 没被独占。比 `SingletonLock`/进程名可靠：锁文件异常退出不清理，
+   进程名会把"另一个 profile 在跑"误判成"这个被占用"。
+5. **被锁时不要白等** —— Chromium 运行时连共享读都不给（实测 30 s / 60 次全失败），
+   把 copy 重试从 6 s 降到 0.4 s，失败路径从 6.08 s → 0.46 s。
 
-### 8.4 服务层返回结构
+### 5.4 下载侧必须同时修
 
-```jsonc
-// submit
-{"accepted": 2, "running": 1, "skipped": 1, "jobs": [{"media_id": "...", "status": "queued"}]}
+只修"测试连接"会留下自相矛盾：测试通过、下载报"需要 Cookie"。所以
+`downloader._cookie_opts()` 增加了桥接：把明文落成 `data/.cookies-from-<浏览器>.txt`
+（10 分钟缓存）交给 yt-dlp 走 `cookiefile`；桥接不可用时退回 `cookiesfrombrowser`。
 
-// wait
-{"state": "done", "done": 3, "failed": 0, "jobs": [...], "waited_sec": 12.4}
+> 缓存文件在 `data/` 下，已被 `.gitignore` 覆盖。
 
-// wait（异常场景）
-{"state": "stalled", "stalled": true, "hint": "任务处于排队态但本进程未在调度它..."}
+### 5.5 国内网络适配
 
-// transcript
-{"media_id": "...", "format": "md", "chars": 4123, "truncated": false, "text": "..."}
-```
-
----
-
-## 9. 安全与健壮性设计
-
-| 风险 | 措施 |
+| 坑 | 处理 |
 |---|---|
-| SSRF / DNS rebinding（短链展开） | 域名白名单 + 解析 IP 复核后才跟随重定向 |
-| 文件名注入 | `_safe_name()` 去非法字符 + 长度截断 |
-| 非法设置导致启动崩溃 | 保存前白名单校验 + 输出目录写探针 |
-| 产物半截 / 写入失败 | 原子写 + PermissionError 退避重试 |
-| JSON 崩溃 JS 端 | 出站统一 `json_safe` + `allow_nan=False` |
-| 打包 exe 编码崩溃 | stdout 编码探测 + `ensure_ascii` 降级 + `backslashreplace` |
-| 双进程抢任务 | `CreateMutexW` 单实例 + `_scheduled` 去重 |
-| 通道被随意开关 | 两个开关只在桌面端可写，`--set` / `update_settings` 拒绝 |
-| 桌面端与 AI 同时写库 | `PRAGMA busy_timeout=5000`（WAL 单写者，撞锁改为等锁） |
-| 第三方库 print 污染 MCP 协议 | `_isolate_stdout()` 把 `sys.stdout` 改指 stderr，协议句柄单独持有 |
-| 客户端塞非 UTF-8 字节 | stdin `errors="replace"` + `serve()` 捕获解码/读错误，降级为 `-32700` 而非崩进程 |
-| 僵尸任务 | 启动恢复全部 `ACTIVE_STATUSES` + `wait()` 的 stalled 检测 |
-| Cookie 泄露 | 只在下载时交给 yt-dlp，不进日志、不打包 |
-| 扫描/删除误伤 | `scripts/bdelete/` 等工具要求显式路径，不做通配删除 |
+| HuggingFace 慢 | `hf-mirror` 镜像 |
+| SSL 证书异常 | 自愈重试 |
+| 系统代理劫持回环 | 所有内部 urllib 显式 `ProxyHandler({})` |
+| CUDA 轮子找不到 | 发布流程注入轮子源 |
+| socket timeout 是"每地址每次" | 探测统一用 `future.result(timeout=)` 硬截止 |
+## 6. 无界面层（CLI / MCP）
 
----
+### 6.1 通道开关
 
-## 10. 打包兼容性坑位
+`enable_cli` / `enable_mcp` 在 `store.DEFAULT_SETTINGS`，桌面端设置页写，CLI/MCP 只读。
+门禁在**构造 Service 之前**判断（不白占 SQLite 锁）：
 
-| 问题 | 对策 |
+| 通道 | 关闭后 |
 |---|---|
-| transformers 误检 sklearn → `GenerationMixin` 导入崩 | spec `excludes=["sklearn"]` + 钩子 `preload_transformers.py` 置 `_sklearn_available=False` |
-| nagisa 裸导入 `prepro`（PEP 366）失败 | 钩子把 nagisa 包目录插入 `sys.path`（不能 `import nagisa.prepro`，会循环导入）；hiddenimports 补 `nagisa/dynet/_dynet` |
-| 沙箱 safe-delete 钩子拦截 PyInstaller 清理 | `release.py` 先 `_evacuate()` 把旧 dist/build 改名撤离，`--noconfirm` 无物可删 |
-| 原生窗口异常 | 固定 WebView2 数据目录；`BILI_FORCE_BROWSER=1` 一键退回浏览器 |
-| CUDA DLL 定位 | `__init__.py` frozen 模式注入 `sys._MEIPASS` 搜索路径 + `gpu_runtime` 注册外置包 |
-| **窗口态 exe 的 stdout 是 GBK** | CLI 编码探测 + `ensure_ascii` 降级；日志 handler 在 `sys.stderr is None` 时不挂 |
-| **`console=False` 时 stdin/stdout 为 None** | `logging_setup` 判空；MCP `_reopen_null_streams()` 明确报错而非 `AttributeError` |
-| NiceGUI `multiprocessing` 重跑模块 | 判断 `multiprocessing.current_process().name` 避免子进程重复建 UI |
+| CLI | 退出码 3，stdout 空 |
+| MCP stdio | stderr 一行说明，返回 1，stdout 保持空（不污染协议帧） |
 
----
+### 6.2 stdout 保护
 
-## 11. 构建与发布
+MCP 的 stdout 就是协议通道。`_isolate_stdout()` 把真协议句柄存局部变量、`sys.stdout` 改指 stderr，
+任何遗留的 `print` 都不会破坏帧。
 
-### 11.1 版本单一来源
+### 6.3 CLI 输出编码
 
-`pyproject.toml` 的 `version` 是唯一真源。`release.py` 自动同步：
+PyInstaller 运行时**不继承** `PYTHONUTF8` / `PYTHONIOENCODING`。旧兜底"装不下才降级"永不触发
+（GBK 装得下常用汉字），所以打包版 CLI 曾输出 GBK。现在 `main()` 首行 `_configure_output_encoding()`：
 
-1. `app/__init__.py` 的 `APP_VERSION`
-2. `build/installer.iss` 的 `AppVersion`
-3. **四份手册头部声明** + 生成带版本后缀的快照
-4. **README 头部声明**（只维护滚动版，不生成快照）
+- 非 tty 的 stdout/stderr → `reconfigure(encoding="utf-8", errors="replace")`
+- 终端保持控制台代码页（否则 `cmd.exe` 花屏）
 
-`tests/` 有版本三处一致性校验，漏同步会直接测试失败。
+### 6.4 MCP HTTP
 
-### 11.2 五产物
-
-| 产物 | 输出 |
+| 项 | 设计 |
 |---|---|
-| Wheel | `dist/bili_transcriber-{ver}-py3-none-any.whl` |
-| 便携包 | `dist/bili-transcriber-portable-{ver}.zip`（onedir 全量，约 6900 文件） |
-| 安装包 | `dist/bili-transcriber-setup-{ver}.exe`（InnoSetup） |
-| 单文件版 | `dist/bili-transcriber-single-{ver}.exe`（onefile，CPU 模式） |
-| GPU 加速包 | `dist/bili-transcriber-gpu-{ver}.zip`（17 个 CUDA DLL） |
+| 绑定 | 只 `127.0.0.1` |
+| 会话 | TTL 30 min、上限 64 淘汰最旧；`touch()` 先 expire 再查（否则过期会话被复活） |
+| 鉴权 | 可选 Bearer token，`hmac.compare_digest` |
+| 跨站 | Origin 白名单；POST/DELETE **同防** |
+| 超时 | Handler `timeout=60`（防慢速半开连接占线程） |
+| 并发 | Service SQLite 非并发安全 → `_handle_lock` 串行化工具调用 |
+| 启动 | `start()` 起守护线程跑 accept；`server_bind` 覆盖掉 `getfqdn()`（DNS 被接管时会挂几十秒） |
 
-产物校验：zip `testzip()`、PE 头（`MZ` / `PE`）、`_built_fresh()` 时间戳防陈旧产物误发。
+### 6.5 八个客户端
 
-### 11.3 命令
+`agent_setup.py` 里 `ClientSpec` 描述格式（JSON / TOML）、键名、路径、是否可写：
+
+| 客户端 | 格式 | 可写 | 特殊处理 |
+|---|---|---|---|
+| WorkBuddy | JSON `mcpServers` | ✅ | 保留其它条目 |
+| DSH | JSON（连接表） | ❌ | 界面托管，拒绝直写并给粘贴片段 |
+| Codex | TOML | ✅ | 只写文档化键 + `startup_timeout_sec` |
+| Claude / Cursor / VS Code / Tare / 通用 | JSON | ✅/粘贴 | VS Code 用 `servers` 键 |
+
+写前 `.bak` 备份；JSONC（带 `//` 注释）给可行动报错而不是裸 traceback。
+
+## 7. 桌面界面层
+
+- **三页签**：任务 / 历史 / 设置；@1 秒轮询 Store（`0.6 s`）驱动刷新。
+- **单实例**：NiceGUI spawn 的子进程会重跑 `main()`，靠 `_is_spawn_child()` 前置放行，
+  否则每次启动多开一个浏览器页。
+- **原生窗口**：`_resolve_ui_mode()` 默认 native（有 WebView2 时）。`ui.run(window_size=...)`
+  会强制 native，所以只有 native 模式才传它。
+- **WebView2 数据目录必须固定**：pywebview 在 `private_mode` 下把 UserDataFolder 设成临时目录，
+  那个临时对象被 GC 后目录被删、渲染进程崩溃、程序静默退出（"开着几分钟自己没了"）。
+- **唤回而不是新开**：`_activate_existing_window()` 轮询 `FindWindowW` 最多 30 s。
+- **托盘**：`on_open` 同样是唤回窗口，不是开浏览器。
+
+## 8. 打包与发布
 
 ```powershell
-python scripts/release.py              # 一键：bump + 五产物 + 文档快照
-python scripts/release.py --wheel-only # 快速交付
-python scripts/release.py --bin-only   # 仅便携 + 安装包（版本已定）
-python scripts/release.py --setup-only # 仅 onedir + 安装包
-python scripts/release.py --single-only# 仅重建单文件版
+.venv\Scripts\python.exe scripts\release.py            # 全量
+.venv\Scripts\python.exe scripts\release.py --bin-only  # 只重建二进制（注意：仍会重建 single + GPU）
 ```
 
----
+### 8.1 四个必炸坑
 
-## 12. 测试体系
+1. **沙箱钩子** —— 脚本内已设 `CODEBUDDY_SAFE_DELETE_SANDBOX=0`。绕过脚本手跑 PyInstaller 必须自己设，
+   否则收尾 `os.remove` 被拦死、构建卡死退出码 1。
+2. **版本三处同步** —— `pyproject.toml` / `build/installer.iss` / `app/__init__.py APP_VERSION`。
+   `release.py` 自动 bump；手改必须三处一起。
+   ⚠️ 脚本**一开头就 bump**，被打断后重跑会再 +1 —— 重跑前先把三处与 README/手册版本头回退到上一版。
+3. **snapshot_docs 滚动快照** —— 发布时生成 `docs/*-{ver}.md` 并删旧快照。
+   **常驻文档（`ai-integration.md`、`adversarial-review.md`）不在快照列表，严禁当旧快照删**。
+4. **dist/build 清理** —— 旧产物移入待删目录（`dist/_trash_YYYYMMDD/`）而非 `rm`，避开 safe-delete 钩子。
 
-`tests/` 共 **29 个文件 / 525 用例**，全绿约 2 分钟。
+### 8.2 产物与上传
 
-| 领域 | 文件 | 策略 |
-|---|---|---|
-| 存储 | `test_store.py` | 真实 SQLite 临时库 |
-| 下载 | `test_downloader.py` / `test_kuaishou.py` | mock yt-dlp / SSR HTML 夹具 |
-| 网络与 Cookie | `test_netcheck.py` / `test_native_dialog.py` | 临时 SQLite 造 Cookie 库、探测函数全 mock,不联网 |
-| 三引擎 | `test_transcriber` / `test_qwen_transcriber` / `test_sensevoice_transcriber` | FakeModel 注入；**并发 load() 回归**（`Barrier(2)` 断言只加载一次） |
-| 编排 | `test_pipeline.py` | FakeDownloader / FakeTranscriber mock 外部边界；含「重复提交不重排」「遗留任务恢复」「半路被杀恢复」 |
-| 服务层 | `test_headless.py` | running 语义 / stalled 检测 / prewarm / 4 项设置校验 / 状态别名 / **search 全文检索** |
-| CLI | `test_cli.py` | 参数解析、JSON 输出、**GBK stdout 回归**、非整数 `--set`、**--grep/--doctor/--agent-config/--mcp-http 门禁** |
-| MCP | `test_mcp_server.py` | 协议握手、**11 工具**、非法参数容错、**批量展平**、**NaN 清洗**、超时夹紧 |
-| MCP HTTP | `test_mcp_http.py` | 会话表 TTL/淘汰、Origin 白名单、Bearer token、路由十态、**真实 socket 端到端** |
-| 接入配置 | `test_agent_setup.py` | 8 客户端渲染、JSON/TOML 合并保留他项、DSH 拒写、**禁止发明 TOML 键** |
-| 落盘 | `test_writers.py` | 原子写重试、无半截文件 |
-| UI | `test_ui.py` / `test_main_helpers.py` | NiceGUI `user_plugin`；`_first_arg` / explorer 引号单测 |
-| 发布 | `test_release_docs.py` | 文档版本头部自动同步 |
-| 打包 | `test_nagisa_ascii.py` 等 | 运行时钩子与兼容性 |
+| 产物 | 说明 |
+|---|---|
+| `setup.exe` | Inno Setup 安装包 |
+| `portable.zip` | onedir 便携版 |
+| `single.exe` | onefile（PyInstaller hook 先判 `sys.stderr is not None` 再写） |
+| `gpu.zip` | NVIDIA 运行库 |
+| `*.whl` | hatchling wheel |
+| `bili-note-skills-*.zip` | 配套技能包（`git archive` 从 `~/.workbuddy/skills/` 三个目录打，过滤 `.bak`/`.tsv`） |
 
-### 12.1 对抗性审查方法论
+上传：`python scripts/github_release_upload.py <tag> <assets...> --notes <md>`（含 3 次重试）。
 
-本项目采用三视角迭代审查：
+### 8.3 冻结版分发开关
 
-| 视角 | 关注点 | 典型产出 |
-|---|---|---|
-| **工具实现者** | 边界条件、资源清理、编码、线程安全 | `_scheduled` 去重、原子写、编码降级 |
-| **审查者** | 契约一致性、错误路径、重复代码 | `ACTIVE_STATUSES` 单一来源、`json_safe` 统一出口 |
-| **AI 使用方** | 参数是否好传、错误是否可读、状态是否可判 | `running` 语义、stalled 提示、`_arg_int` 容错 |
+`main.py`：**exe 默认进 GUI，必须 `--cli` 才进 CLI**；源码 `python -m app.cli` 天然是 CLI。
+改 `render_cli` / `agent_setup` 片段时 frozen 分支**必须保留 `--cli`**（曾有"误修"把它删掉，
+后来真机跑 `--doctor` 起了 GUI 才抓回）。回归测试双向锁定：冻结版必含 / 源码版必不含。
 
-原则：**先拿到真实报错再改**。上面每一条修复都对应一次实际运行的失败输出，而不是"看起来可能有问题"。
+## 9. 质量基线与测试
 
-v0.1.43 发布后连续三轮换攻击面复审（HTTP 传输 / 配置合并 / 服务层检索与设置），
-累计收敛 **10 个真 bug + 5 项加固**，包括：TOML 合并遇行尾注释会让 Codex
-config.toml 全崩（tomllib 实证）、`search` 大小写不敏感完全失效（双重检查基准
-不一致）、`--mcp-http` 真实路径缺 `import sys`（517 项测试全绿仍漏网）、
-HTTP `DELETE` 无鉴权、JSONC 配置裸 traceback 等 —— 全记录见
-[`docs/adversarial-review.md`](adversarial-review.md)。
+- **544 条测试 / 29 个文件**，全绿约 2 分钟。
+- 测试**全部离线**：Cookie 库用临时 SQLite 造，网络探测全 mock，不依赖本机装了什么。
+- 组装层（CLI 入口、HTTP 服务、冻结包）必须有**子进程级 e2e** —— 曾经 517 项全绿但
+  `--mcp-http` 真机一跑就 `NameError`（测试只盖了类，没盖包装入口）。
 
-### 12.2 运行
+| 测试文件组 | 覆盖 |
+|---|---|
+| `test_pipeline / test_downloader` | 状态机、断点续跑、Cookie 桥接与缓存 |
+| `test_transcriber / qwen / sensevoice` | 三引擎批量与回退 |
+| `test_netcheck` | 三态语义、桥接布局、Netscape 闭环、前缀识别 |
+| `test_mcp_server / test_mcp_http` | 11 工具、边界值、鉴权、跨站、真 socket e2e |
+| `test_cli / test_release_docs` | 参数不冲突、文档片段与冻结版一致性 |
+| `test_ui / test_ui_mode` | 界面渲染与形态分发 |
 
-```powershell
-.venv\Scripts\pytest -q                       # 全量
-.venv\Scripts\pytest tests/test_cli.py -v     # 单文件
-```
+## 10. 已知限制与设计取舍
 
----
-
-## 13. 已知限制
-
-- **仅验证 Windows**。macOS / Linux 未验证：`native_dialog`（comdlg32）、`main.py` 单实例（`CreateMutexW`）、`ui/helpers` 的 explorer 调用都是 Windows 专属；其他平台会降级但未测试。
-- **GPU 提速只覆盖 whisper**（ctranslate2）。Qwen3-ASR 走 torch，有卡会快但不是同一套优化；SenseVoice 走 onnxruntime CPU。
-- **yt-dlp 无法在打包版内单独升级**。平台接口变更后需要发新版。
-- **快手 SSR 解析依赖分享页结构**，站点改版需同步更新 `app/kuaishou.py`。
-- **沙箱 / 受限环境下 PyInstaller 重跑可能被安全删除策略拦截**，最终 exe 构建需在本机完整权限下完成。
-- **MCP 只实现 JSON-RPC 子集**，不支持 resources / prompts / sampling 等更上层能力。
-- **讲义关键帧上限 400 帧**，超长视频会漏掉部分页面。
+1. **浏览器开着时读不到 Cookie** —— Chromium 独占锁，属浏览器设计；文案让用户关掉浏览器而非假装重试。
+2. **v20 只能在原路径解** —— ABE 密钥绑定路径，所以"复制 profile 到别处再解"对 v20 无效。
+3. **转写串行** —— 不是懒，是显存决定的；并行只会 OOM。
+4. **MCP HTTP 无服务端推送** —— GET /mcp 恒 405（规范允许），长任务靠轮询。
+5. **会话表 64 上限** —— 超限淘汰最旧；业务状态在 DB，回收无副作用。
+6. **不加新运行时依赖** —— Cookie 桥用标准库手写 WebSocket，打包体积不变。

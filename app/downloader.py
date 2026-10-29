@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import re
 import socket
 import threading
@@ -21,7 +22,9 @@ from typing import Callable
 
 import yt_dlp
 
-from app import ffmpeg_bin
+from app import ffmpeg_bin, paths
+
+logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], None]
 
@@ -296,12 +299,55 @@ class Downloader:
         self._proxy = (proxy or "").strip()
         _reach_cache.clear()  # 代理变更后重新探测
 
+    # 浏览器 Cookie 的缓存有效期:太短每次下载都起浏览器(1~6 秒),
+    # 太长会用到已过期的登录态。10 分钟是"一次批量任务内复用、跨任务刷新"的折中。
+    _BRIDGE_TTL = 600.0
+
+    def _bridged_cookie_file(self) -> Path | None:
+        """把浏览器 Cookie 经 cookiebridge 落成临时 cookies.txt(带缓存)。
+
+        为什么需要这一步:Chrome 127+ 的 Cookie 是应用绑定加密(v20),
+        yt-dlp 自己解不开(复制库失败或 DPAPI 解密失败,issues/7271+10927)。
+        测试连接已经能读出明文,但下载时若还交给 "cookiesfrombrowser",
+        就会出现"测试通过、下载报需要 Cookie"的自相矛盾。
+        这里把明文落成 Netscape 文件,让 yt-dlp 走它唯一能走通的路(cookiefile)。
+        """
+        from app import cookiebridge
+
+        browser = self._cookies_from_browser
+        cache = paths.base_dir() / "data" / f".cookies-from-{browser}.txt"
+        try:
+            if cache.is_file() and (time.time() - cache.stat().st_mtime) < self._BRIDGE_TTL:
+                return cache
+        except OSError:
+            pass
+        try:
+            cookies = cookiebridge.read_cookies(browser)
+        except Exception as exc:  # noqa: BLE001 — 桥接失败就退回旧行为,不阻断下载
+            logger.debug("浏览器 Cookie 桥接失败(%s),退回 yt-dlp 原生读取:%s", browser, exc)
+            return None
+        if not cookies:
+            return None
+        try:
+            cookiebridge.write_netscape(cookies, cache)
+            cache.chmod(0o600)  # 内含登录凭据,只给当前用户
+        except OSError as exc:
+            logger.debug("写入 Cookie 缓存失败:%s", exc)
+            return None
+        return cache
+
     def _cookie_opts(self) -> dict:
         opts: dict = {}
         if self._cookie_file:
             opts["cookiefile"] = self._cookie_file
         elif self._cookies_from_browser in SUPPORTED_BROWSERS:
-            opts["cookiesfrombrowser"] = (self._cookies_from_browser, None, None, None)
+            bridged = self._bridged_cookie_file()
+            if bridged is not None:
+                opts["cookiefile"] = str(bridged)
+            else:
+                # 桥接不可用(浏览器正开着/未登录)时保持旧行为:
+                # 让 yt-dlp 自己报它那句源头错误,至少和"关掉浏览器"的提示对得上。
+                opts["cookiesfrombrowser"] = (self._cookies_from_browser, None, None, None)
         return opts
 
     def _yt_opts(self, **extra) -> dict:

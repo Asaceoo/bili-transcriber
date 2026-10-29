@@ -226,6 +226,10 @@ class PlatformTest:
     detail: str = ""
 
 
+# 元信息读不到时的短文案:同一句话不再在每个平台行里重复一遍
+SHORT_UNREADABLE_DETAIL = "浏览器 Cookie 库被占用,关掉浏览器后重测(或改用 cookies.txt)"
+
+
 @dataclass
 class TestReport:
     items: list[PlatformTest] = field(default_factory=list)
@@ -304,11 +308,14 @@ def _match_cookies(rows: Iterable[tuple[str, str, datetime | None]]) -> dict[str
     return hits
 
 
-def _read_sqlite_cookies(db: Path, query: str) -> tuple[list[tuple], str, bool]:
+def _read_sqlite_cookies(db: Path, query: str,
+                         wait: float = 0.0) -> tuple[list[tuple], str, bool]:
     """把 Cookie 库复制到临时目录再读,返回 (行, 错误文案, 是否被占用)。
 
-    必须复制:浏览器运行时原库被独占锁定(Windows 上直接 PermissionError),
-    复制失败就说明"浏览器正在运行",这不算错误,交给上层转成友好提示。
+    必须复制:浏览器运行时原库被独占锁定(Windows 上直接 PermissionError)。
+    但"锁"是间歇的 —— 浏览器只在写事务时持独占句柄,同一个库里几十次尝试
+    全失败、隔一会儿又能复制是很常见的。因此 wait>0 时按退避重试,
+    避免把"一时锁住"报成"读不到",那会让整页结果全变红(假的失败)。
     """
     try:
         tmpdir = Path(tempfile.mkdtemp(prefix="bili-cookie-"))
@@ -316,12 +323,17 @@ def _read_sqlite_cookies(db: Path, query: str) -> tuple[list[tuple], str, bool]:
         return [], f"临时目录创建失败:{exc.strerror or exc}", False
     try:
         target = tmpdir / db.name
-        try:
-            shutil.copy2(db, target)
-        except PermissionError:
-            return [], "", True
-        except OSError as exc:
-            return [], f"读取失败:{exc.strerror or exc}", False
+        deadline = time.monotonic() + max(0.0, wait)
+        while True:
+            try:
+                shutil.copy2(db, target)
+                break
+            except PermissionError:
+                if time.monotonic() >= deadline:
+                    return [], "", True
+                time.sleep(0.35)
+            except OSError as exc:
+                return [], f"读取失败:{exc.strerror or exc}", False
         # 顺带复制 WAL/回滚日志,避免读到半截事务
         for suffix in ("-wal", "-shm", "-journal"):
             side = db.with_name(db.name + suffix)
@@ -343,16 +355,16 @@ def _read_sqlite_cookies(db: Path, query: str) -> tuple[list[tuple], str, bool]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-def _read_chromium(db: Path) -> tuple[list[tuple[str, str, datetime | None]], str, bool]:
-    rows, error, locked = _read_sqlite_cookies(db, "SELECT host_key, name, expires_utc FROM cookies")
+def _read_chromium(db: Path, wait: float = 0.0) -> tuple[list[tuple[str, str, datetime | None]], str, bool]:
+    rows, error, locked = _read_sqlite_cookies(db, "SELECT host_key, name, expires_utc FROM cookies", wait)
     if error or locked:
         return [], error, locked
     out = [(str(r[0] or ""), str(r[1] or ""), _expiry_from_chrome(r[2])) for r in rows]
     return out, "", False
 
 
-def _read_firefox(db: Path) -> tuple[list[tuple[str, str, datetime | None]], str, bool]:
-    rows, error, locked = _read_sqlite_cookies(db, "SELECT host, name, expiryDate FROM moz_cookies")
+def _read_firefox(db: Path, wait: float = 0.0) -> tuple[list[tuple[str, str, datetime | None]], str, bool]:
+    rows, error, locked = _read_sqlite_cookies(db, "SELECT host, name, expiryDate FROM moz_cookies", wait)
     if error or locked:
         return [], error, locked
     out = [(str(r[0] or ""), str(r[1] or ""), _expiry_from_unix(r[2])) for r in rows]
@@ -881,8 +893,16 @@ def build_report(browsers: list[BrowserInfo], cookie_files: list[CookieFileInfo]
 
 
 def _friendly_browser_error(exc: Exception) -> str:
+    """把 yt-dlp / DPAPI 的原始异常翻成可行动的中文。
+
+    v20(应用绑定加密)是 Chrome 127+ 的默认,Cookie 只能由浏览器本体解密;
+    这类错误不再建议“升级 yt-dlp”,而是直接告诉用户走浏览器导出或关闭浏览器。
+    """
     text = str(exc)
     low = text.lower()
+    if "10927" in low or "decrypt with dpapi" in low or "app_bound" in low:
+        return ("浏览器用了应用绑定加密(v20),第三方无法解密:"
+                "点「从浏览器导出 cookies.txt」填路径,或关闭浏览器后重试")
     if ("could not copy" in low or "cookie database" in low or "being used" in low
             or "permission" in low):
         return "浏览器正在运行,Cookie 数据库被占用(关闭浏览器后重试)"
@@ -910,17 +930,90 @@ class _QuietYdlLogger:
         logger.debug("yt-dlp 错误: %s", msg)
 
 
+def _rows_from_bridge(cookies: list[dict]) -> tuple[list[tuple[str, str, datetime | None]],
+                                                    dict[str, dict[str, str]]]:
+    """把 cookiebridge 的 CDP Cookie 列表转成本模块的 (域名, 名字, 有效期) 三元组。"""
+    rows: list[tuple[str, str, datetime | None]] = []
+    values: dict[str, dict[str, str]] = {}
+    for cookie in cookies:
+        host = str(cookie.get("domain") or "").lstrip(".").lower()
+        name = str(cookie.get("name") or "")
+        raw_expires = cookie.get("expires")
+        try:
+            seconds = float(raw_expires)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        expires = None
+        if seconds > 0:
+            try:
+                expires = datetime.fromtimestamp(seconds, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                expires = None
+        rows.append((host, name, expires))
+        platform = _platform_of(host, name)
+        if platform:
+            values.setdefault(platform, {})[name] = str(cookie.get("value") or "")
+    return rows, values
+
+
+def _browser_metadata(browser: str) -> dict[str, PlatformCookie] | None:
+    """只读浏览器 Cookie 库的元信息(域名/名字/有效期),不解密。
+
+    返回 dict = 读到了(可能没有某平台的登录态,那是真的"没有");
+    返回 None = 根本没读到(库被占用/不存在),这时才该报"读取失败"。
+    区分这两者是关键:前者不是错误,后者才是。
+    """
+    from app import cookiebridge
+
+    found = cookiebridge.newest_profile(browser)
+    if found is None:
+        return None
+    _profile, db = found
+    try:
+        # 退避重试 3 秒:浏览器运行时的锁是间歇的,短暂锁住不该算"读不到"
+        rows, error, locked = _read_chromium(db, wait=3.0)
+    except Exception:  # noqa: BLE001 — 元信息读不到就当没读到
+        return None
+    if error or locked:
+        return None
+    return _match_cookies(rows)
+
+
 def _browser_cookie_values(browser: str) -> tuple[dict[str, dict[str, str]],
-                                                  dict[str, PlatformCookie], str]:
-    """经 yt-dlp 解密浏览器 Cookie(这一步才需要读 Cookie 值)。"""
+                                                  dict[str, PlatformCookie],
+                                                  dict[str, PlatformCookie] | None, str]:
+    """读出浏览器 Cookie,返回 (值, 值的登录态, 元信息登录态, 错误文案)。
+
+    值与元信息是两条独立路径,必须一次调用里都拿到:
+    - 元信息(域名/名字/有效期)永远只读库、不解密,Chrome 127+ 也读得到;
+    - 值(明文)才需要浏览器本体在**原路径**解密(v20),或退回 yt-dlp(v10)。
+    把两者分开返回,才能在「有登录态但值解不开」时如实提示而不谎报失败。
+    """
+    from app import cookiebridge
+
+    metadata = _browser_metadata(browser)
+    bridge_error = ""
+    try:
+        cookies = cookiebridge.read_cookies(browser)
+        if cookies:
+            rows, values = _rows_from_bridge(cookies)
+            return values, _match_cookies(rows), metadata, ""
+        bridge_error = "浏览器里没有可读取的 Cookie(先在浏览器登录目标平台)"
+    except cookiebridge.CookieBridgeError as exc:
+        bridge_error = str(exc)
+    except Exception as exc:  # noqa: BLE001 — 桥接异常不能把检测打崩
+        bridge_error = f"直读 Cookie 失败:{exc}"
+
     try:
         from yt_dlp.cookies import extract_cookies_from_browser
     except Exception as exc:  # noqa: BLE001 — 缺依赖也要给可读文案
-        return {}, {}, f"当前版本缺少 yt-dlp:{exc}"
+        return {}, {}, metadata, f"{bridge_error};当前版本缺少 yt-dlp:{exc}"
     try:
         jar = extract_cookies_from_browser(browser, logger=_QuietYdlLogger())
     except Exception as exc:  # noqa: BLE001 — 锁定/解密失败都转成用户可读提示
-        return {}, {}, _friendly_browser_error(exc)
+        fallback = _friendly_browser_error(exc)
+        # 桥接与 yt-dlp 都失败:优先展示桥接的可行动提示(它给出的路才是真正能通的)
+        return {}, {}, metadata, bridge_error or fallback
 
     rows: list[tuple[str, str, datetime | None]] = []
     values: dict[str, dict[str, str]] = {}
@@ -936,7 +1029,7 @@ def _browser_cookie_values(browser: str) -> tuple[dict[str, dict[str, str]],
         platform = _platform_of(host, cookie.name)
         if platform:
             values.setdefault(platform, {})[cookie.name] = cookie.value
-    return values, _match_cookies(rows), ""
+    return values, _match_cookies(rows), metadata, ""
 
 
 def _bili_login(values: dict[str, str], proxy: str, timeout: float) -> tuple[str, str]:
@@ -988,6 +1081,8 @@ def test_configuration(browser: str = "", cookie_file: str = "", proxy: str = ""
     states: dict[str, PlatformCookie] = {}
     source = ""
     source_error = ""
+    value_error = ""  # 值读不到(≠ 登录态读不到):两种失败要分开处理
+    metadata: dict[str, PlatformCookie] | None = None  # None = 连元信息都没读到
     file_path = (cookie_file or "").strip()
     if file_path:
         if Path(file_path).is_file():
@@ -998,30 +1093,47 @@ def test_configuration(browser: str = "", cookie_file: str = "", proxy: str = ""
             source = "cookies.txt(路径不存在)"
             source_error = f"文件不存在:{file_path}"
     elif browser:
-        values, states, source_error = _browser_cookie_values(browser)
+        values, states, metadata, value_error = _browser_cookie_values(browser)
         source = f"{browser} 浏览器 Cookie"
+        if value_error and metadata is not None:
+            # Cookie 值读不到(Chrome 127+ 的 v20 只能由浏览器本体在**原路径**解密)。
+            # 这一步不该把“有登录态”的平台都标成读取失败:元信息(域名/名字/有效期)
+            # 一直读得到,用户真正需要知道的是“登录态在、值暂时取不到、怎么才能取到”。
+            # metadata 为 None 才代表“连元信息都没读到”,那时保持旧行为(unreadable)。
+            states = metadata
     else:
         source = "未配置 Cookie(仅能下载公开内容)"
         source_error = ""  # 未配置不算"读取失败",各平台按 missing 展示
 
+    # 三种"读不到"必须分开:文件/库读不到(source_error / 元信息 None)= unreadable;
+    # 库读到了、只是值解不开(value_error 且元信息可用)= 状态照常,另附值取不到的说明。
+    metadata_available = metadata is not None
     report = TestReport(source=source)
     for platform in PLATFORMS:
         ok, ms, _error = net[platform]
         cookie = states.get(platform)
         state = "missing"
         detail = "未找到登录 Cookie,仅能下载公开内容"
-        if platform == "bilibili" and cookie and cookie.present and not cookie.expired:
-            state, detail = _bili_login(values.get("bilibili", {}), proxy, timeout)
-        elif cookie and cookie.present and cookie.expired:
+        if cookie and cookie.present and cookie.expired:
             state = "expired"
             detail = f"{cookie.name} 已过期({cookie.expires_at})"
         elif cookie and cookie.present:
-            state = "present"
-            detail = f"找到 {cookie.name}" + (
-                f",有效期至 {cookie.expires_at}" if cookie.expires_at else ",会话级")
-        elif source_error:
+            if value_error:
+                # 登录态在,但值是加密的(读不到明文)→ 如实标注,不冒充已验证
+                state = "present"
+                detail = (f"找到 {cookie.name}" + (
+                    f",有效期至 {cookie.expires_at}" if cookie.expires_at else ",会话级")
+                    + ";值加密读不到,下载时需关闭浏览器后再试或改用 cookies.txt")
+            elif platform == "bilibili":
+                state, detail = _bili_login(values.get("bilibili", {}), proxy, timeout)
+            else:
+                state = "present"
+                detail = f"找到 {cookie.name}" + (
+                    f",有效期至 {cookie.expires_at}" if cookie.expires_at else ",会话级")
+        elif source_error or (value_error and not metadata_available):
+            # 连元信息都没读到才算"读取失败";元信息可用但没有该平台 Cookie 是真的"没有"
             state = "unreadable"
-            detail = source_error
+            detail = source_error or value_error
         report.items.append(PlatformTest(platform, ok, ms, state, detail))
 
     youtube = report.by_platform("youtube")
@@ -1029,16 +1141,32 @@ def test_configuration(browser: str = "", cookie_file: str = "", proxy: str = ""
         report.warnings.append("YouTube 不可达:境外视频需要配置代理(其它平台不受影响)")
     if source_error and (file_path or browser):
         report.warnings.append(f"Cookie 读取失败:{source_error}")
+    if value_error and metadata_available:
+        # 登录态读到了、只有值解不开:这是提示,不是失败
+        report.warnings.append(value_error)
+    elif value_error:
+        # 连元信息都没读到:五平台会各自 unreadable,可行动的那句话只说一遍
+        report.warnings.append(f"Cookie 读取失败:{value_error}")
+        for item in report.items:
+            if item.cookie_state == "unreadable":
+                item.detail = SHORT_UNREADABLE_DETAIL
     domestic = [i for i in report.items if i.platform != "youtube"]
     net_ok = all(i.network_ok for i in domestic)
+    # "登录态在" ≠ "配置可用":Cookie 值取不到时 yt-dlp 拿到的是空串,
+    # 下载照样会失败。这里把它当成"可用"就是假阳性 —— 用户看到绿灯去下载,
+    # 结果报需要 Cookie,反而找不到原因。
     cookie_ok = any(i.cookie_state in ("verified", "present") for i in report.items)
-    report.ok = net_ok and cookie_ok
+    values_usable = cookie_ok and not value_error
+    report.ok = net_ok and values_usable
     if report.ok:
         report.summary = "配置可用:国内平台网络正常,已识别到登录 Cookie"
     elif not net_ok:
         report.summary = "网络异常:有平台无法连接,请检查网络或代理"
     elif not cookie_ok:
         report.summary = "网络正常,但没读到登录 Cookie:高清/会员/风控内容可能下载失败"
+    elif value_error:
+        report.summary = ("识别到登录态,但 Cookie 值取不到(下载时用不上):"
+                          "关闭浏览器后重测,或改用 cookies.txt")
     else:
         report.summary = "配置基本可用,请留意下方提示"
     return report
@@ -1048,24 +1176,40 @@ def test_configuration(browser: str = "", cookie_file: str = "", proxy: str = ""
 
 
 def export_browser_cookies(browser: str, dest: Path) -> Path:
-    """把浏览器 Cookie 导出成 Netscape cookies.txt(需关闭浏览器)。
+    """把浏览器 Cookie 导出成 Netscape cookies.txt。
 
-    导出后 yt-dlp 直接读文件,不再依赖浏览器进程与解密,稳定性最好;
-    但文件内含登录凭据,只在用户明确点按钮时生成。
+    先走 cookiebridge(浏览器本体解密,支持 Chrome 127+ 的 v20,且不需要关闭浏览器),
+    失败再退回 yt-dlp 的 jar.save(老库 v10 仍可用)。文件内含登录凭据,
+    只在用户明确点按钮时生成。
     """
     if not browser:
         raise NetcheckError("请先选择浏览器")
+    from app import cookiebridge
+
+    dest = Path(dest)
+    bridge_error = ""
+    try:
+        cookies = cookiebridge.read_cookies(browser)
+        if cookies:
+            try:
+                path = cookiebridge.write_netscape(cookies, dest)
+            except OSError as exc:
+                raise NetcheckError(f"写入失败:{exc.strerror or exc}") from exc
+            return path
+        bridge_error = "浏览器里没有可导出的 Cookie,请先在浏览器登录对应平台"
+    except cookiebridge.CookieBridgeError as exc:
+        bridge_error = str(exc)
+
     try:
         from yt_dlp.cookies import extract_cookies_from_browser
     except Exception as exc:  # noqa: BLE001
-        raise NetcheckError(f"当前版本缺少 yt-dlp:{exc}") from exc
+        raise NetcheckError(bridge_error or f"当前版本缺少 yt-dlp:{exc}") from exc
     try:
         jar = extract_cookies_from_browser(browser, logger=_QuietYdlLogger())
     except Exception as exc:  # noqa: BLE001
-        raise NetcheckError(_friendly_browser_error(exc)) from exc
+        raise NetcheckError(bridge_error or _friendly_browser_error(exc)) from exc
     if not len(jar):
-        raise NetcheckError("浏览器里没有可导出的 Cookie,请先在浏览器登录对应平台")
-    dest = Path(dest)
+        raise NetcheckError(bridge_error or "浏览器里没有可导出的 Cookie,请先在浏览器登录对应平台")
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         jar.save(str(dest), ignore_discard=True, ignore_expires=True)

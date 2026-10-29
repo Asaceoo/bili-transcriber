@@ -236,6 +236,7 @@ get_transcript(media_id)
 | 端口 8765 被占 | `--mcp-http` 省略端口会自动向后找 20 个;指定端口时换一个即可 |
 | 日志里出现 `database is locked` | 0.1.39 及更早:桌面端与 MCP 同时写 `history.db` 撞锁。0.1.40 起 `busy_timeout=5000`,升级即可 |
 | 客户端把整段会话断开 | 旧版遇到非 UTF-8 字节会崩;0.1.40 起降级为 `-32700` 解析错误并继续 |
+| `check_network` 显示「读取失败」/「值加密读不到」 | Chrome 127+ 的 Cookie 是应用绑定加密(v20),值只能由浏览器本体在原始配置路径解密。**关掉 Chrome/Edge 再测**;或点「从浏览器导出 cookies.txt」填路径(导出后 yt-dlp 不再需要解密) |
 
 ---
 

@@ -449,7 +449,9 @@ class MCPServer:
         # 延迟导入:netcheck 会拉起探测线程,不用的场景(纯转写)不该付这份成本
         from app import netcheck
 
-        mode = str(args.get("mode", "quick") or "quick").lower()
+        # strip 必须和 lower 一起做:AI 常把 " test " 这种带空格的值塞进来,
+        # 只 lower 不 strip 会让「大写能过、带空格不能过」变成不可预测的行为。
+        mode = str(args.get("mode", "quick") or "quick").strip().lower()
         if mode not in ("quick", "full", "test"):
             raise ServiceError(
                 f"mode 只支持 quick/full/test,收到:{args.get('mode')!r}")
@@ -458,7 +460,15 @@ class MCPServer:
             timeout = 15.0
 
         if mode == "test":
-            report = netcheck.test_configuration(timeout=timeout)
+            # "按当前配置实测"必须真的读用户配置:不传 browser/cookie_file/proxy
+            # 就永远只能拿到"未配置 Cookie",与工具说明自相矛盾(AI 使用方最容易踩)。
+            settings = self.service.get_settings()
+            report = netcheck.test_configuration(
+                str(settings.get("cookies_from_browser", "") or ""),
+                str(settings.get("cookie_file", "") or ""),
+                str(settings.get("proxy", "") or ""),
+                timeout=timeout,
+            )
             return {
                 "mode": mode,
                 "ok": report.ok,

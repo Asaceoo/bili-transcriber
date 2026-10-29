@@ -426,13 +426,85 @@ def test_test_configuration_verifies_bilibili_cookie(tmp_path, monkeypatch):
 
 
 def test_test_configuration_reports_locked_browser(tmp_path, monkeypatch):
+    """浏览器被占用、连元信息都读不到时,五平台应全部标 unreadable。"""
     monkeypatch.setattr(netcheck, "_probe", lambda url, proxy="", timeout=4.0: (True, 80, ""))
     monkeypatch.setattr(netcheck, "_browser_cookie_values",
-                        lambda browser: ({}, {}, "浏览器正在运行,Cookie 数据库被占用(关闭浏览器后重试)"))
+                        lambda browser: ({}, {}, None,
+                                         "浏览器正在运行,Cookie 数据库被占用(关闭浏览器后重试)"))
     report = netcheck.test_configuration("chrome", "", "")
     assert report.ok is False
     assert report.by_platform("bilibili").cookie_state == "unreadable"
     assert any("读取失败" in w for w in report.warnings)
+
+
+def test_test_configuration_value_error_keeps_metadata_states(tmp_path, monkeypatch):
+    """v20 场景:值解不开,但元信息读到登录态 —— 不能谎报成"读取失败"。
+
+    Chrome 127+ 的 Cookie 是应用绑定加密,值只能由浏览器本体在原路径解密;
+    这时用户真正需要知道的是「登录态在、值取不到、怎么办」,而不是「全平台读取失败」。
+    """
+    metadata = {
+        "bilibili": netcheck.PlatformCookie("bilibili", "SESSDATA", ".bilibili.com", "2027-01-01"),
+        "douyin": netcheck.PlatformCookie("douyin", "sessionid", ".douyin.com", "2027-01-01"),
+    }
+    monkeypatch.setattr(netcheck, "_probe", lambda url, proxy="", timeout=4.0: (True, 80, ""))
+    monkeypatch.setattr(
+        netcheck, "_browser_cookie_values",
+        lambda browser: ({}, {}, metadata,
+                         "浏览器正在运行:Cookie 用的是应用绑定加密(v20),第三方解不开 ——"
+                         "关闭浏览器后点一次「测试连接」或「导出」即可,或改用 cookies.txt"))
+    report = netcheck.test_configuration("chrome", "", "")
+    # 有登录态的平台不再被标成 unreadable,而是 present + 说明值的问题
+    assert report.by_platform("bilibili").cookie_state == "present"
+    assert report.by_platform("douyin").cookie_state == "present"
+    assert "值加密读不到" in report.by_platform("bilibili").detail
+    # 没有登录态的平台仍然是 missing(不是 unreadable)
+    assert report.by_platform("youtube").cookie_state == "missing"
+    assert any("应用绑定加密" in w for w in report.warnings)
+
+
+def test_value_error_is_not_reported_as_ok(tmp_path, monkeypatch):
+    """值取不到时绝不能报「配置可用」—— yt-dlp 拿到空值,下载照样失败。
+
+    这是最糟的一类错误:绿灯让用户去下载,失败后报"需要 Cookie",无从排查。
+    """
+    metadata = {"bilibili": netcheck.PlatformCookie(
+        "bilibili", "SESSDATA", ".bilibili.com", "2027-01-01")}
+    monkeypatch.setattr(netcheck, "_probe", lambda url, proxy="", timeout=4.0: (True, 80, ""))
+    monkeypatch.setattr(netcheck, "_browser_cookie_values",
+                        lambda b: ({}, {}, metadata, "值加密读不到"))
+    report = netcheck.test_configuration("chrome", "", "")
+    assert report.ok is False
+    assert "值取不到" in report.summary
+    # 平台行仍然如实显示登录态存在(不谎报失败,也不谎报可用)
+    assert report.by_platform("bilibili").cookie_state == "present"
+
+
+def test_full_values_are_reported_ok(tmp_path, monkeypatch):
+    """对照组:值真的拿到了才允许报可用。"""
+    monkeypatch.setattr(netcheck, "_probe", lambda url, proxy="", timeout=4.0: (True, 80, ""))
+    monkeypatch.setattr(netcheck, "_bili_login",
+                        lambda values, proxy, timeout: ("verified", "在线校验通过:me"))
+    monkeypatch.setattr(netcheck, "_browser_cookie_values",
+                        lambda b: ({"bilibili": {"SESSDATA": "v"}},
+                                   {"bilibili": netcheck.PlatformCookie(
+                                       "bilibili", "SESSDATA", ".bilibili.com", "2027-01-01")},
+                                   {}, ""))
+    report = netcheck.test_configuration("chrome", "", "")
+    assert report.ok is True
+    assert "配置可用" in report.summary
+
+
+def test_test_configuration_unknown_browser_metadata_is_empty(tmp_path, monkeypatch):
+    """拿不到元信息时保持旧行为:unreadable + 可行动文案。"""
+    monkeypatch.setattr(netcheck, "_probe", lambda url, proxy="", timeout=4.0: (True, 80, ""))
+    monkeypatch.setattr(netcheck, "_browser_cookie_values",
+                        lambda browser: ({}, {}, None, "没找到该浏览器的 Cookie 数据库"))
+    report = netcheck.test_configuration("chrome", "", "")
+    assert report.by_platform("bilibili").cookie_state == "unreadable"
+    # 平台行用统一短文案(不把同一句话重复五遍),完整原因进 warnings
+    assert report.by_platform("bilibili").detail == netcheck.SHORT_UNREADABLE_DETAIL
+    assert any("没找到" in w for w in report.warnings)
 
 
 def test_test_configuration_without_cookie_config(tmp_path, monkeypatch):
@@ -542,3 +614,149 @@ def test_default_cookie_dirs_includes_downloads(tmp_path):
     dirs = netcheck.default_cookie_dirs(tmp_path, tmp_path / "data")
     assert tmp_path in dirs
     assert any("Downloads" in str(d) for d in dirs)
+
+# ---------------------------------------------------------------- cookiebridge
+
+from app import cookiebridge
+
+
+def test_bridge_profile_root_splits_user_data_and_profile(tmp_path):
+    """Chromium 布局:<User Data>/Local State + <User Data>/Default/Network/Cookies。"""
+    root = tmp_path / "User Data"
+    (root / "Default" / "Network").mkdir(parents=True)
+    (root / "Local State").write_text("{}", encoding="utf-8")
+    db = root / "Default" / "Network" / "Cookies"
+    db.write_bytes(b"")
+    assert cookiebridge.profile_root(root / "Default") == (root, Path("Default"))
+    # Opera 形态:根目录自身就是 profile
+    assert cookiebridge.profile_root(root) == (root, Path("."))
+
+
+def test_bridge_writes_netscape_that_netcheck_can_parse(tmp_path):
+    """导出的 cookies.txt 必须能被项目自己的解析器读出登录态(闭环)。"""
+    cookies = [
+        {"name": "SESSDATA", "value": "abc", "domain": ".bilibili.com", "path": "/",
+         "expires": 4102444800, "httpOnly": True, "secure": True},
+        {"name": "sessionid", "value": "xyz", "domain": ".douyin.com", "path": "/",
+         "expires": -1, "httpOnly": False, "secure": False},
+        {"name": "", "value": "skip", "domain": ".bilibili.com", "path": "/"},
+    ]
+    dest = cookiebridge.write_netscape(cookies, tmp_path / "cookies.txt")
+    total, platforms, values, error = netcheck.parse_cookie_file(dest)
+    assert error == ""
+    assert total == 2  # 空名字被丢弃
+    assert set(platforms) == {"bilibili", "douyin"}
+    assert not platforms["bilibili"].expired
+    assert values["bilibili"]["SESSDATA"] == "abc"
+    # HttpOnly 前缀要写进文件(否则 yt-dlp 解析时会被当注释吞掉)
+    assert "#HttpOnly_.bilibili.com" in dest.read_text(encoding="utf-8")
+
+
+def test_bridge_session_cookie_gets_placeholder_expiry(tmp_path):
+    """会话级 Cookie(expires<=0)写文件时用远期值占位,不能被解析成已过期。"""
+    dest = cookiebridge.write_netscape(
+        [{"name": "SESSDATA", "value": "v", "domain": ".bilibili.com", "expires": 0}],
+        tmp_path / "c.txt")
+    _total, platforms, _values, error = netcheck.parse_cookie_file(dest)
+    assert error == ""
+    assert platforms["bilibili"].expired is False
+
+
+def test_bridge_describe_prefixes_flags_v20():
+    assert "v20" in cookiebridge.describe_prefixes({"763230": 5})
+    assert "应用绑定加密" in cookiebridge.describe_prefixes({"763230": 5})
+    assert cookiebridge.describe_prefixes({"763130": 5}).startswith("v10")
+    assert cookiebridge.describe_prefixes({}) == ""
+
+
+def test_bridge_encryption_prefixes_reads_without_browser(tmp_path):
+    """只读密文前缀,不解密:用临时库验证 v20 统计。"""
+    db = tmp_path / "Cookies"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE cookies (host_key TEXT, name TEXT, expires_utc INTEGER,"
+                 " encrypted_value BLOB)")
+    conn.execute("INSERT INTO cookies VALUES ('.a.com','a',0,?)",
+                 (b"v20" + b"\x00" * 20,))
+    conn.execute("INSERT INTO cookies VALUES ('.b.com','b',0,?)",
+                 (b"v10" + b"\x00" * 20,))
+    conn.commit()
+    conn.close()
+    prefixes = cookiebridge.encryption_prefixes(db)
+    assert prefixes.get("763230") == 1
+    assert prefixes.get("763130") == 1
+
+
+def test_bridge_has_login_cookie_detects_marker():
+    cookies = [{"name": "SESSDATA", "value": "x"}]
+    assert cookiebridge.has_login_cookie(cookies, {"SESSDATA", "DedeUserID"})
+    assert not cookiebridge.has_login_cookie(cookies, {"sessionid"})
+
+
+# ---------------------------------------------------------------- 桥接与元信息的分工
+
+
+def test_browser_cookie_values_prefers_bridge(tmp_path, monkeypatch):
+    """桥接能拿到值时,不该再去碰 yt-dlp(那条路在 v20 上必失败)。"""
+    def fake_read_cookies(browser):
+        return [{"name": "SESSDATA", "value": "v", "domain": ".bilibili.com",
+                 "expires": 4102444800}]
+
+    def boom(*a, **k):
+        raise AssertionError("不该调用 yt-dlp")
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", fake_read_cookies)
+    monkeypatch.setattr(netcheck, "_browser_metadata", lambda browser: {})
+    import yt_dlp.cookies as ytdlp_cookies
+    monkeypatch.setattr(ytdlp_cookies, "extract_cookies_from_browser", boom)
+    values, states, metadata, error = netcheck._browser_cookie_values("chrome")
+    assert error == ""
+    assert values["bilibili"]["SESSDATA"] == "v"
+    assert states["bilibili"].name == "SESSDATA"
+
+
+def test_browser_cookie_values_falls_back_to_ytdlp(tmp_path, monkeypatch):
+    """桥接失败(v20/占用)时退回 yt-dlp,老 v10 库仍能读出来。"""
+    class _Jar:
+        def __iter__(self):
+            class _C:
+                domain = ".bilibili.com"
+                name = "SESSDATA"
+                value = "old"
+                expires = 4102444800
+            return iter([_C()])
+
+    def bridge_fail(browser, timeout=30.0):
+        raise cookiebridge.CookieBridgeError("浏览器正在运行")
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", bridge_fail)
+    monkeypatch.setattr(netcheck, "_browser_metadata", lambda browser: {})
+    import yt_dlp.cookies as ytdlp_cookies
+    monkeypatch.setattr(ytdlp_cookies, "extract_cookies_from_browser",
+                        lambda name, logger=None: _Jar())
+    values, states, _metadata, error = netcheck._browser_cookie_values("chrome")
+    assert error == ""
+    assert values["bilibili"]["SESSDATA"] == "old"
+
+
+def test_browser_cookie_values_both_paths_fail_reports_bridge_hint(monkeypatch):
+    """两条路都失败时,必须给桥接的可行动提示(那是唯一真能通的路)。"""
+    def bridge_fail(browser, timeout=30.0):
+        raise cookiebridge.CookieBridgeError("关闭浏览器后重试")
+
+    def ytdlp_fail(name, logger=None):
+        raise RuntimeError("Failed to decrypt with DPAPI")
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", bridge_fail)
+    monkeypatch.setattr(netcheck, "_browser_metadata", lambda browser: None)
+    import yt_dlp.cookies as ytdlp_cookies
+    monkeypatch.setattr(ytdlp_cookies, "extract_cookies_from_browser", ytdlp_fail)
+    _values, _states, metadata, error = netcheck._browser_cookie_values("chrome")
+    assert metadata is None
+    assert "关闭浏览器" in error
+
+
+def test_friendly_error_mentions_abe_not_upgrade():
+    """v20 的报错要引导去导出/关闭浏览器,而不是含糊说"版本较新"。"""
+    text = netcheck._friendly_browser_error(
+        RuntimeError("Failed to decrypt with DPAPI. See https://github.com/yt-dlp/yt-dlp/issues/10927"))
+    assert "cookies.txt" in text or "导出" in text

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 import pytest
 
@@ -404,3 +404,78 @@ def test_probe_does_not_need_http_chunk():
     dl = Downloader(ydl_factory=lambda o: FakeYDL(o))
     dl.probe("https://x")
     assert "http_chunk_size" not in FakeYDL.calls[0][1]
+
+# ---------------------------------------------------------------- 浏览器 Cookie 桥接
+
+def test_browser_cookie_is_bridged_to_cookiefile(tmp_path, monkeypatch):
+    """Chrome 127+ 的 v20 无法被 yt-dlp 自己解 —— 下载必须走我们导出的 cookiefile。
+
+    否则会出现最糟的自相矛盾:设置页「测试通过」,下载报「需要 Cookie」。
+    """
+    from app import cookiebridge
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", lambda b, timeout=30.0: [
+        {"name": "SESSDATA", "value": "v", "domain": ".bilibili.com",
+         "path": "/", "expires": 4102444800}])
+    monkeypatch.setattr(cookiebridge, "write_netscape",
+                        lambda cookies, dest: _write(dest))
+    monkeypatch.setattr("app.paths.base_dir", lambda: tmp_path)
+
+    dl = Downloader(cookies_from_browser="chrome")
+    opts = dl._cookie_opts()
+    assert "cookiefile" in opts, opts
+    assert "cookiesfrombrowser" not in opts
+    assert Path(opts["cookiefile"]).is_file()
+
+
+def _write(dest):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    return Path(dest)
+
+
+def test_browser_cookie_bridge_failure_falls_back(tmp_path, monkeypatch):
+    """桥接不可用(浏览器开着/未登录)时退回 yt-dlp 原生读取,不阻断下载。"""
+    from app import cookiebridge
+
+    def boom(b, timeout=30.0):
+        raise cookiebridge.CookieBridgeError("浏览器正在运行")
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", boom)
+    monkeypatch.setattr("app.paths.base_dir", lambda: tmp_path)
+    dl = Downloader(cookies_from_browser="chrome")
+    opts = dl._cookie_opts()
+    assert opts == {"cookiesfrombrowser": ("chrome", None, None, None)}
+
+
+def test_explicit_cookie_file_wins_over_bridge(tmp_path, monkeypatch):
+    """用户手填的 cookies.txt 优先级最高,不该被桥接覆盖。"""
+    from app import cookiebridge
+
+    def boom(*a, **k):
+        raise AssertionError("有 cookie_file 时不该碰桥接")
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", boom)
+    dl = Downloader(cookies_from_browser="chrome", cookie_file="D:/x/c.txt")
+    assert dl._cookie_opts() == {"cookiefile": "D:/x/c.txt"}
+
+
+def test_bridge_cache_is_reused(tmp_path, monkeypatch):
+    """缓存命中时不再起浏览器(下载循环里每次都起会慢到不可用)。"""
+    from app import cookiebridge
+
+    calls = {"n": 0}
+
+    def counting(b, timeout=30.0):
+        calls["n"] += 1
+        return [{"name": "SESSDATA", "value": "v", "domain": ".bilibili.com",
+                 "path": "/", "expires": 4102444800}]
+
+    monkeypatch.setattr(cookiebridge, "read_cookies", counting)
+    monkeypatch.setattr(cookiebridge, "write_netscape",
+                        lambda cookies, dest: _write(dest))
+    monkeypatch.setattr("app.paths.base_dir", lambda: tmp_path)
+    dl = Downloader(cookies_from_browser="edge")
+    dl._cookie_opts()
+    dl._cookie_opts()
+    assert calls["n"] == 1

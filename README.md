@@ -1,364 +1,363 @@
 <div align="center">
 
-<img src="docs/assets/hero.svg" alt="bili-transcriber：B站音频本地转写" width="100%" />
+<img src="docs/assets/hero.svg" alt="bili-transcriber —— 把 B 站视频变成可读的文字" width="100%" />
 
 # bili-transcriber
 
-**粘贴一个链接，拿回一份可用的文字稿。下载、转码、转写全在你自己的机器上完成。**
+**把 B 站（以及抖音 / 小红书 / 快手 / YouTube）的视频变成可检索、可引用、可交给 AI 的文字。**
+
+下载 → 转码 → 本地 GPU 转写 → SRT / TXT / Markdown。全程本机运行，音频不上传。
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![UI](https://img.shields.io/badge/UI-NiceGUI-5898d4)](https://nicegui.io)
 [![Engine](https://img.shields.io/badge/ASR-Whisper%20%7C%20Qwen3%20%7C%20SenseVoice-6f42c1)](#三个识别引擎)
 [![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-000000)](#ai-集成cli--mcp)
-[![Tests](https://img.shields.io/badge/tests-525%20passed-2ea44f)](tests)
+[![Tests](https://img.shields.io/badge/tests-544%20passed-2ea44f)](tests)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D4)](#系统要求)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+> 对应版本 **v0.1.45** · 版本号由发布脚本自动递增，平时只改这一处
 
 </div>
 
-> 本 README 对应 **v0.1.44** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
-
 ---
+
+## 它到底解决什么问题
+
+你看了一个 40 分钟的 B 站技术讲座，想引用第 23 分钟那段话，却只能反复拖进度条。
+
+bili-transcriber 把它变成一份带时间戳的 Markdown：搜关键词、跳回原片、整段引给 AI，都行。
+所有计算都在你的机器上完成 —— 音频文件不会离开本机。
+
+> 一句话：**粘贴链接 → 等一下 → 得到可检索的文字稿。**
 
 ## 目录
 
-| 章节 | 你会得到什么 |
+| 章节 | 你会看到 |
 |---|---|
-| [一句话的旅程](#一句话的旅程) | 从链接到字幕，中间到底发生了什么 |
-| [功能一览](#功能一览) | 支持哪些平台、引擎、输出 |
-| [安装](#安装) | 四种形态，任选其一 |
-| [快速开始](#快速开始) | 三分钟跑通第一个任务 |
-| [使用说明](#使用说明) | 三个页签逐页讲清 |
+| [一句话的旅程](#一句话的旅程) | 一次任务里数据怎么流动 |
+| [功能一览](#功能一览) | 支持哪些平台、三个识别引擎、还有什么 |
+| [安装](#安装) | 四种交付形态怎么选 |
+| [快速开始](#快速开始) | 三条命令跑起来 |
+| [使用说明](#使用说明) | 三个页签 + 每个设置项 |
 | [20 个使用实例](#20-个使用实例) | 直接抄走的真实场景 |
-| [命令行参考](#命令行参考) | 33 个参数全表 |
-| [AI 集成（CLI / MCP）](#ai-集成cli--mcp) | 三条通道接入 WorkBuddy/DSH/Codex 等 |
-| [输出结构](#输出结构) | 产物长什么样 |
-| [常见问题](#常见问题) | 10 个高频坑 |
-| [数据与隐私](#数据与隐私) | 什么会联网、什么不会 |
-| [开发与测试](#开发与测试) | 源码运行、跑测试、打包 |
-| [文档](#文档) | 手册索引、架构与模块职责入口 |
-
----
+| [命令行参考](#命令行参考) | 全部 34 个选项 |
+| [AI 集成（CLI / MCP）](#ai-集成cli--mcp) | 八种客户端怎么接 |
+| [输出结构](#输出结构) | 产物长什么样、放在哪 |
+| [Cookie 与网络](#cookie-与网络国内网络必读) | 国内网络与登录态的坑 |
+| [常见问题](#常见问题) | 出问题先看这里 |
+| [开发与测试](#开发与测试) | 跑测试、发版本 |
 
 ## 一句话的旅程
 
-<img src="docs/assets/pipeline.svg" alt="处理流程：链接或文件到 SRT/TXT/Markdown" width="100%" />
+<img src="docs/assets/pipeline.svg" alt="从链接到文字稿的数据流" width="100%" />
 
-一条链接进来，经过五道工序：
+1. **解析** —— yt-dlp 展开链接：单 P、多 P 合集、短链、搜索页弹窗……统一成「待处理条目」。
+2. **下载** —— 只拉音频流（要图文讲义时才拉视频流）；支持断点续跑，中间文件处理完即删。
+3. **转码** —— FFmpeg 统一转成 16 kHz 单声道 WAV，三个引擎都吃这个格式。
+4. **转写** —— 本地 GPU 上的三个引擎之一；模型按 (模型, 设备, 精度, 语言, VAD) 缓存，改设置才重载。
+5. **写盘** —— SRT / TXT / Markdown 三件套，标题、UP 主、时长、时间戳齐全，落在你指定的目录。
 
-1. **探测** — 认出是哪个平台，把短链展开，把「合集」「多 P」拆成一条条独立任务。
-2. **下载** — 只取最佳音轨（开启图文讲义时改取视频流），落到本地缓存。
-3. **转码** — FFmpeg 统一成 16 kHz 单声道 WAV，这是所有引擎都吃得下的格式。
-4. **转写** — 本地模型推理，GPU 优先、失败自动回退 CPU。
-5. **落盘** — SRT / TXT / Markdown 三件套，可选的图文讲义 Markdown。
-
-任何一步失败，重跑会**复用已完成的缓存**，不会从头再来。
-
----
+一个后台工作线程串行跑完全程（状态机 queued → downloading → converting → transcribing → saving → done/failed），
+转写阶段全程持锁保护 GPU。
 
 ## 功能一览
 
 ### 支持平台
 
-| 平台 | 免登录 | 备注 |
-|---|:---:|---|
-| B 站 | ✅ | 单 P / 多 P / 合集自动展开；支持 Cookie 拿高码率 |
-| 抖音 | ⚠️ | 精选内容需配浏览器 Cookie |
-| 小红书 | ⚠️ | 同上 |
-| 快手 | ✅ | 自研 SSR 解析，不走 yt-dlp |
-| YouTube | ⚠️ | 需网络代理；部分视频需 Cookie |
-| 本地文件 | ✅ | 14 种音视频格式直接转写 |
+| 平台 | 支持度 | 说明 |
+|---|---|---|
+| **B 站** | ✅ 完整 | 单 P / 多 P / 合集自动展开；大会员与高清需要 Cookie |
+| **快手** | ✅ 完整 | 走分享页自研解析通道，免登录 |
+| **抖音** | ⚠️ 需 Cookie | 精选内容需配浏览器 Cookie 或 cookies.txt |
+| **小红书** | ⚠️ 需 Cookie | 登录后才返回完整视频地址 |
+| **YouTube** | ⚠️ 需代理 | 境内必须配代理；年龄限制/会员视频需 Cookie |
+| **本地文件** | ✅ 完整 | 直接把本地音视频交给任务页 |
 
 ### 三个识别引擎
 
-| 引擎 | 模型 | 适合谁 |
-|---|---|---|
-| **Whisper**（默认） | `large-v3-turbo` / `large-v3` / `medium` / `small` / `base` / `tiny` | 准确率优先，支持 CUDA 加速 |
-| **Qwen3-ASR** | `Qwen3-ASR-0.6B` / `1.7B` | 中文口语、方言口音表现好 |
-| **SenseVoice** | `SenseVoiceSmall` | 体积小、速度快，CPU 也跑得动 |
+| 引擎 | 后端 | 特点 | 适用 |
+|---|---|---|---|
+| **Whisper**（默认） | faster-whisper + ctranslate2 | 稳、生态成熟；CUDA 下支持批量推理 | 通用首选 |
+| **Qwen3-ASR** | qwen-asr（transformers）+ ForcedAligner | 中文与中英混说更准，字级时间戳 | 中文讲座、访谈 |
+| **SenseVoice** | sherpa-onnx（int8） | 极轻量、启动快、CPU 友好 | 没独显、只要草稿 |
 
-三个引擎共享同一套流程与输出格式，设置页切换即生效，不需要改代码。
+切换引擎在设置页，或命令行加 `--engine whisper|qwen3-asr|sensevoice`。
 
 ### 其他
 
-- **断点续跑** — 失败重跑跳过已完成的下载 / 转码。
-- **图文讲义** — 自动识别 PPT 翻页画面，生成「时间戳 + 截图 + 该页字幕」的讲义。
-- **独立程序窗口** — 双击直接开原生窗口（WebView2），不再被丢进浏览器；没装 WebView2 才自动退回浏览器。
-- **系统托盘** — 托盘图标可唤回窗口或退出。
-- **单实例保护** — 重复启动只会把已有窗口提到前台，不会抢同一个任务、也不会闪退。
-- **CLI + MCP 三通道** — 命令行、MCP stdio、MCP HTTP（streamable-http）三种方式调用；CLI/CLI、MCP/MCP 两个开关，设置页一键关闭。`--agent-config` 一条命令生成 8 种 AI 客户端的接入配置。
-- **网络与 Cookie 一键检测** — 自动扫出浏览器登录态、cookies.txt 和本机代理并填好设置，点「测试连接」当场验证能不能用。
-- **纯本地** — 转写过程不调用任何外部 AI API。
-
----
-
+- **网络与 Cookie 一键检测** —— 自动扫出浏览器登录态、本机 cookies.txt 和可用代理，点「测试连接」当场验证能不能真用。
+- **图文讲义** —— 从视频关键帧 + 转写段落生成带截图的讲义（`--notes`）。
+- **全文检索** —— `--grep 关键词` 在所有已完成任务的转写稿里搜，返回命中片段与上下文。
+- **AI 可调用** —— 同一套服务层暴露成 CLI 与 MCP（stdio + HTTP），八种 AI 客户端一键配置。
+- **单实例保护** —— 重复双击只会把已有窗口提到前台，不会抢任务、不会闪退。
 ## 安装
 
 ### 系统要求
 
-| 项目 | 要求 |
-|---|---|
-| 操作系统 | Windows 10 / 11（已验证）；macOS / Linux 未验证 |
-| Python（源码模式） | ≥ 3.11 |
-| GPU（可选） | NVIDIA + CUDA 12.x；无卡自动回退 CPU |
-| FFmpeg | **不用装**，随包内置静态版 |
-| 磁盘 | 程序约 700 MB，Whisper 模型 1.6 GB，GPU 包 1.3 GB |
+| 项 | 要求 | 说明 |
+|---|---|---|
+| 系统 | Windows 10 / 11（x64） | 安装版与便携版都在此测试 |
+| 显卡 | 可选 NVIDIA GPU | 有则 GPU 加速；没有也能跑（CPU 慢 3~10 倍） |
+| 内存 | 8 GB 起 | Whisper large-v3-turbo 约需 3 GB |
+| 磁盘 | 3 GB 起 | 模型 + 产物；模型默认放用户目录 |
+| Python | 3.11+（仅源码模式） | 开发环境实测 3.14 |
 
 ### 四种形态
 
-| 形态 | 文件 | 适合 |
-|---|---|---|
-| 安装版 | `bili-transcriber-setup-{ver}.exe` | 普通用户，向导安装，建快捷方式 |
-| 便携包 | `bili-transcriber-portable-{ver}.zip` | 解压即用，不写注册表，可放 U 盘 |
-| 单文件版 | `bili-transcriber-single-{ver}.exe` | 临时用一次；CPU 模式，首启解压较慢 |
-| 源码 | `pip install -e .` | 开发、调试、二次开发 |
+| 形态 | 文件 | 适合谁 | 特点 |
+|---|---|---|---|
+| **安装版** | `bili-transcriber-setup-x.y.z.exe` | 绝大多数人 | 有开始菜单、卸载项，可覆盖升级 |
+| **便携版** | `bili-transcriber-portable-x.y.z.zip` | 不想装、放 U 盘 | 解压即用，绿包 |
+| **单文件版** | `bili-transcriber-single-x.y.z.exe` | 临时用一次 | 一个 exe 拷走就跑，启动略慢 |
+| **wheel** | `bili_transcriber-x.y.z-py3-none-any.whl` | 开发者 / 装进自己的环境 | `pip install` 后得到 `bili-transcriber` 等三个入口 |
+
+> 双击 exe 默认进**独立窗口**（内置 WebView2）。想退回浏览器界面：设环境变量 `BILI_FORCE_BROWSER=1`。
+> 窗口态程序没有控制台，诊断信息都写进 `%LOCALAPPDATA%\Bili Note\logs\app.log`（2 MB 轮转，留 3 份）。
 
 ### GPU 加速包（可选）
 
-安装版与便携包默认 CPU 推理。要让 Whisper 走 NVIDIA 显卡：
-
-1. 下载 `bili-transcriber-gpu-{ver}.zip`（约 1.3 GB，含 17 个 CUDA DLL）。
-2. 解压到 `%LOCALAPPDATA%\Bili Note\gpu\`，**保留 zip 内的 `nvidia/<包>/bin/` 结构**（程序按这个结构找 DLL，压平会找不到）。
-3. 重启应用 —— 程序自动注册 DLL 目录，无需配环境变量。
-
-> 没装 GPU 包也不会报错：程序静默回退 CPU，只是慢一些。
-
----
+`bili-transcriber-gpu-x.y.z.zip` 里是 NVIDIA 运行库（cuBLAS / cuDNN），解压覆盖到便携版目录即可。
+安装版与 wheel 版已把依赖声明进包，通常无需额外操作。
 
 ## 快速开始
 
-```powershell
+`B`powershell
 # 1. 装（源码模式）
-python -m venv .venv
-.venv\Scripts\pip install -e .
+git clone https://github.com/Asaceoo/bili-transcriber && cd bili-transcriber
+python -m venv .venv && .venv\Scripts\pip install -e .
 
-# 2. 跑
+# 2. 跑：桌面窗口
 .venv\Scripts\python -m app.main
 
-# 3. 弹出独立程序窗口(冷启动 10-20 秒)
-```
+# 3. 或者命令行直接转一条
+.venv\Scripts\python -m app.cli "https://www.bilibili.com/video/BV1xx411c7mD"
+`B`
 
-在输入框粘贴 `https://www.bilibili.com/video/BV1xxxxxxxxx`，点「添加」。
+首次转写会自动下载模型（走 hf-mirror 镜像，约 1.5 GB），之后离线可用。
+产物默认落在设置里的 `output_dir`。
 
-第一次跑会下载模型（约 1.6 GB，走国内镜像），之后完全离线。10 分钟的视频在 RTX 3060 上大约 40 秒出字幕。
-
----
+> 冷启动要 10~20 秒：导入 torch / transformers 是主要开销。窗口会先出来，再逐段渲染。
 
 ## 使用说明
 
-界面三个页签：**任务 / 历史 / 设置**。
+界面三个页签，加一个设置页。左侧步骤条把「该干什么」写死，不用记。
 
 ### 任务（Tasks）
 
-1. 输入框粘贴链接 → 点「添加」。
-2. 系统自动探测，把单 P / 多 P / 合集展开成多条任务。
-3. 状态依次推进：`queued → downloading → converting → transcribing → saving → done`（开讲义会多一段 `extracting`）。
-4. 每行可单独操作：**打开所在文件夹** / **重新运行** / **取消**。
-
-**转写本地文件有两个入口：**
-
-- **选择文件（推荐）** — 弹系统原生文件框，直接引用原路径，零拷贝秒提交，大文件首选。
-- **浏览器上传** — 手机或另一台电脑访问本机网页时才用；走 base64 传输，大文件明显慢。副本存在 `uploads/`，不会自动删除。
-
-支持格式：`mp4 mkv mov avi webm flv wmv mp3 m4a wav ogg opus flac aac`。
+- **粘贴链接或拖入文件** → 点「开始」。单 P、多 P 合集、短链、本地音视频都走同一个入口。
+- 队列串行：下载/转码可并行（设置里的「并发任务数」1~6），**转写始终串行**保护 GPU。
+- 每行显示阶段、进度、耗时；失败行点开看真实报错（不是"转写失败"四个字）。
+- 暂停 / 继续 / 取消都在行内；暂停的任务重启程序会自动续跑。
+- 下方「运行日志」实时滚动，排障先看它。
 
 ### 历史（History）
 
-已完成任务的索引，存在本地 SQLite（`data/history.db`）。可按状态 / 关键字筛选，每行可打开文件夹或重跑。
-
-清空历史不会删产物文件，只删索引。
+- 所有任务落 SQLite（`data/history.db`），主键是平台内媒体 ID，重跑会覆盖同一条。
+- 可按标题 / UP 主 / 平台筛；点开能直接读产物、重新打开输出目录。
+- 搜索关键词命中的是**标题**；要搜转写稿正文用 `--grep` 或 MCP 的 `search_transcript`。
 
 ### 设置（Settings）
 
-全部存在 `data/settings.json`，有「恢复默认」一键还原。
+按「会不会影响转写结果」排序，逐个说明：
 
-| 设置 | 可选值 | 说明 |
+| 设置 | 取值 | 影响 |
 |---|---|---|
-| 识别引擎 | whisper / qwen3-asr / sensevoice | 切换后模型列表自动跟随 |
-| 转写模型 | 按引擎而定 | whisper 默认 `large-v3-turbo` |
-| 设备 | auto / cuda / cpu | 有 N 卡选 `auto` |
-| 计算精度 | auto / float16 / int8_float16 / int8 | 显存不足改 `int8` |
-| 语言 | 空 = 自动 / zh / en | 中文视频指定 `zh` 更快更准 |
-| 保留音频 | 开 / 关 | 是否保留原始音频文件 |
-| VAD | 开 / 关 | 纯音乐场景会自动关闭重试 |
-| 图文讲义 | 开 / 关 | B 站任务改下视频流，体积明显变大 |
+| 识别引擎 | whisper / qwen3-asr / sensevoice | 决定用哪个模型；切换会重新加载模型 |
+| Whisper 模型 | tiny ~ large-v3-turbo | 越大越准越慢；默认 large-v3-turbo |
+| 设备 | auto / cuda / cpu | auto 优先 CUDA，不可用回落 CPU |
+| 计算精度 | auto / float16 / int8_float16 / int8 | 显存不够就降精度 |
+| 语言 | auto / zh / en | 指定语言更快更准；auto 自动检测 |
+| 保留音频 | 开 / 关 | 留原始音频备查，或转完即删 |
+| VAD 静音过滤 | 开 / 关 | 跳过静音段，长视频提速明显 |
+| 图文讲义 | 开 / 关 | 打开后 B 站任务会下视频流做关键帧截图 |
 | 模型目录 | 路径 | 默认 `%LOCALAPPDATA%\Bili Note\models` |
-| 浏览器 Cookie | 不使用 / Chrome / Edge / Firefox / Brave / Chromium / Opera / Vivaldi | 抖音精选、部分 YouTube 需要；可一键检测自动选 |
+| 浏览器 Cookie | 不使用 / Chrome / Edge / Firefox / Brave / Chromium / Opera / Vivaldi | 抖音精选、部分 YouTube 需要 |
 | cookies.txt | 文件路径 | **优先于**浏览器 Cookie；不受浏览器开关影响 |
-| 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要；可点「探测」自动找 |
-| 输出目录 | 路径 | 默认 `output/` |
-| 并发数 | 整数 | 下载/转码并发，转写始终串行 |
+| 网络代理 | 如 `http://127.0.0.1:7890` | YouTube 等境外平台需要；点「探测」自动找 |
+| 输出目录 | 路径 | 产物落地处；相对路径会被解析成绝对路径 |
+| 并发任务数 | 1~6 | 下载/转码并行度 |
 | 允许 CLI 调用 | 开 / 关 | 关掉后 `--cli` 直接拒绝（退出码 3） |
-| 允许 MCP 调用 | 开 / 关 | 关掉后 `--mcp` 拒绝启动（退出码 1） |
+| 允许 MCP 调用 | 开 / 关 | 关掉后 `--mcp` / `--mcp-http` 被拦 |
 
-> 设置页保存前会校验：引擎 / 设备白名单，输出目录实际可创建可写。填错直接拒绝并提示原因。
-
----
-
+> 通道开关**只能在桌面端点**：CLI 与 MCP 自己改不了。这是刻意的 —— 防止被提示注入的 AI 打开或关掉自己的通道。
 ## 20 个使用实例
+
+从「最常用」到「进阶自动化」，每条都能直接抄。命令里的 `.venv\Scripts\` 前缀是源码模式；
+用 exe 的话把 `.venv\Scripts\python -m app.cli` 换成 `bili-transcriber.exe --cli`。
 
 ### 入门三例
 
-**1. 单个视频转字幕（最常用）**
+**1. 转一条普通 B 站视频**
 
-```
-粘贴 https://www.bilibili.com/video/BV1xx411c7mD → 添加
-→ output/BV1xx411c7mD_标题/标题.srt
-```
-
-**2. 一次搞定整个系列（多 P / 合集）**
-
-```
-粘贴带 ?p=1 的分 P 链接或合集链接 → 添加
-→ 自动展开为 N 条任务，逐条转写
-→ 同一合集的分 P 共享一个输出目录，文件名带 _P01 / _P02 后缀区分
+```powershell
+.venv\Scripts\python -m app.cli "https://www.bilibili.com/video/BV1xx411c7mD"
 ```
 
-中途某 P 失败不影响其他，重跑只补失败那条。
+等它跑完，产物在输出目录：`标题.srt` / `标题.txt` / `标题.md`。
 
-**3. 把手机录的语音备忘转成文字**
+**2. 整个合集 / 多 P 一次性转完**
 
+```powershell
+.venv\Scripts\python -m app.cli "https://space.bilibili.com/123456/channel/collectiondetail?sid=789" --json
 ```
-任务页 → 选择文件(推荐) → 选中 D:\录音\会议.m4a
-→ output/本地_会议/会议.txt
+
+合集自动展开成多个条目，同一合集共享输出目录，靠 `_P01` `_P02` 后缀区分单 P。
+
+**3. 本地录好的音频也能转**
+
+```powershell
+.venv\Scripts\python -m app.cli "D:\录音\周会.m4a" --language zh
 ```
 
----
+本地文件不过网络，直接进转码与转写。
 
 ### 日常四例
 
-**4. 给视频加双语字幕（先出中文稿，再人工翻）**
-
-设置 `语言 = zh`、`计算精度 = int8_float16` → 转写 → 拿到 `.srt` → 导入 Aegisub / Subtitle Edit 翻译 → 导出双语。
-
-**5. 只想读文字，不要时间戳**
+**4. 只要文字稿，不要字幕文件**
 
 ```powershell
-bili-transcriber-cli "https://www.bilibili.com/video/BV1xx411c7mD" --json
-# 然后直接读 txt 产物，或：
-bili-transcriber-cli --result BV1xx411c7mD_p1 --format txt
+.venv\Scripts\python -m app.cli "https://www.bilibili.com/video/BV1xx411c7mD" --format txt
 ```
 
-只提交不等结果用 `--no-wait`：任务留在队列，**下次启动桌面端会自动续跑**，不会变僵尸任务。
-
-**6. 提取某段话的位置（做笔记要贴时间点）**
-
-打开 `.md` 产物，每段前面就是 `[hh:mm:ss]` 时间戳，复制即可。需要精确到秒时用 `.srt`。
-
-**7. 批量转写一个文件夹里的所有录音**
+**5. 用 CPU 跑（机器没有独显）**
 
 ```powershell
-Get-ChildItem D:\录音\*.m4a | ForEach-Object {
-    .venv\Scripts\bili-transcriber-cli $_.FullName --json --timeout 3600
-}
+.venv\Scripts\python -m app.cli "BV1xx411c7mD" --device cpu --model small --compute-type int8
 ```
 
----
+**6. 中文技术讲座，换 Qwen3-ASR 更准**
+
+```powershell
+.venv\Scripts\python -m app.cli "BV1xx411c7mD" --engine qwen3-asr --language zh
+```
+
+**7. 顺手产出图文讲义**
+
+```powershell
+.venv\Scripts\python -m app.cli "BV1xx411c7mD" --notes
+```
+
+会额外下视频流做关键帧截图，得到 `标题.notes.md` + `标题_frames\slide_*.jpg`。
 
 ### 进阶五例
 
-**8. 提取课程 PPT 讲义（图文讲义）**
+**8. 批量：把一个目录里的录音全丢给 CLI**
 
-设置页开「图文讲义」→ 转写 → 得到 `标题.notes.md` + `标题_frames/slide_*.jpg`。
+```powershell
+Get-ChildItem D:\录音\*.m4a | ForEach-Object {
+    .venv\Scripts\python -m app.cli $_.FullName --json --timeout 3600
+}
+```
 
-每页 = 可点击时间戳 + 关键帧截图 + 该画面期间的字幕。适合技术分享、公开课。
+**9. 只提交不等待，让桌面端后台跑**
 
-**9. 显存不够，降精度接着跑**
+```powershell
+.venv\Scripts\python -m app.cli "BV1xx411c7mD" --no-wait
+```
 
-报 `CUDA out of memory` → 计算精度改 `int8`（占用减半）→ 重跑，**缓存命中不会重新下载**。
+任务留在队列，下次启动桌面端自动续跑。
 
-**10. 换更快的模型做粗剪**
+**10. 在所有已完成的转写稿里全文检索**
 
-设置 `模型 = small` + `设备 = cuda` → 转写速度提升数倍，准确率略降。适合先粗看内容再决定要不要精修。
+```powershell
+.venv\Scripts\python -m app.cli --grep "注意力机制" --context 400 --limit 5
+```
 
-**11. 中文口语 / 方言重的访谈**
+返回命中任务、标题与上下文片段 —— 比逐个打开 md 快得多。
 
-设置 `引擎 = qwen3-asr`、`模型 = Qwen3-ASR-1.7B`。中文口语和口音场景通常比 Whisper 更稳。
+**11. 读某条任务已生成的产物（不重新转）**
 
-> 1.7B 在 CPU 上约为 0.6B 的 3 倍耗时，程序会主动提示。有 GPU 时快得多。
+```powershell
+.venv\Scripts\python -m app.cli --result BV1xx411c7mD --format md --max-chars 0
+```
 
-**12. 纯老 CPU 机器也能跑**
+`--max-chars 0` 是全文；默认截断到 12000 字符，适合喂给上下文有限的 AI。
 
-设置 `引擎 = sensevoice`、`设备 = cpu`。模型只有几百 MB，速度可接受。
+**12. 查看队列与状态**
 
----
+```powershell
+.venv\Scripts\python -m app.cli --list --status-filter running
+.venv\Scripts\python -m app.cli --status BV1xx411c7mD
+```
 
 ### 平台三例
 
-**13. 抖音精选视频下不下来**
+**13. 抖音精选（要 Cookie）**
 
-设置页配「浏览器 Cookie = Chrome」（先在该浏览器登录抖音）→ 重试。如果仍失败，改用导出 `cookies.txt` 填路径（优先级更高）。
+```powershell
+.venv\Scripts\python -m app.cli --set cookies_from_browser=chrome
+.venv\Scripts\python -m app.cli "https://v.douyin.com/xxxxx"
+```
 
-**14. YouTube 视频要代理**
+Chrome 开着时 Cookie 库被独占，先在设置页点「测试连接」看提示；或导出 cookies.txt 后 `--set cookie_file=...`。
 
-设置「网络代理 = `http://127.0.0.1:7890`」→ 重试。代理变更后程序会清空网络探测缓存重新测。
+**14. 小红书笔记视频**
 
-**15. 快手链接直接丢进来**
+```powershell
+.venv\Scripts\python -m app.cli "https://www.xiaohongshu.com/explore/xxxxxxxx"
+```
 
-`https://v.kuaishou.com/xxxxx` 分享链免登录解析，走自研 SSR 通道，不需要 Cookie。
+登录后才返回完整视频地址 —— 配浏览器 Cookie 或 cookies.txt。
 
----
+**15. 快手分享链（免登录）**
+
+```powershell
+.venv\Scripts\python -m app.cli "https://v.kuaishou.com/xxxxx"
+```
+
+走自研分享页解析，不需要 Cookie。
 
 ### AI 集成三例
 
-**16. 让 WorkBuddy 直接转写（一条命令接入）**
+**16. 让 AI 客户端一条命令接上（stdio）**
 
-```text
-bili-transcriber-cli --agent-config workbuddy --write
-# 写进 ~/.workbuddy/mcp.json(已有配置原样保留,写前自动备份)
+```powershell
+.venv\Scripts\python -m app.cli --doctor                      # 先看本机装了哪些客户端
+.venv\Scripts\python -m app.cli --agent-config codex --write  # 写进 ~/.codex/config.toml（自动备份 .bak）
 ```
 
-重启 WorkBuddy 后在对话里说「把这个链接转成文字稿」，
-AI 自己调 `transcribe` → `wait_jobs` → `get_transcript`。
+**17. 走 HTTP，给不能拉子进程的客户端**
 
-**17. 不能拉子进程的客户端走 MCP HTTP（DSH 等）**
-
-```text
-bili-transcriber-cli --mcp-http            # 从 8765 起自动找空位,stdout 打印实际端点
-bili-transcriber-cli --agent-config dsh --transport http   # 粘贴进 DSH「添加 MCP 连接」
+```powershell
+.venv\Scripts\python -m app.cli --mcp-http 8765
+# 客户端配 http://127.0.0.1:8765/mcp
 ```
 
-同一个服务，stdio 与 HTTP 两条通道工具完全一致；HTTP 只绑本机回环。
+服务只绑 127.0.0.1，带 Origin 白名单；要鉴权就设 `BILI_MCP_HTTP_TOKEN`。
 
-**18. AI 帮你找回“上次讲过 X 的那个视频”**
+**18. 在 AI 对话里让它直接转写并检索**
 
 ```text
-bili-transcriber-cli --grep 注意力机制 --limit 5
-# 或在 MCP 对话里让 AI 调 search_transcript 工具
+你：用 check_network 看看我的 Cookie 和代理现在能不能用
+AI：（调 check_network mode=test）→ 逐平台返回延迟与登录态
+
+你：转写这个视频，并找出讲"分布式一致性"的那段
+AI：（transcribe → wait_jobs → search_transcript）→ 返回时间戳与原文
 ```
-
-返回命中的任务、标题、上下文片段与产物路径 —— 转写稿多了以后不用一个个翻。
-
----
 
 ### 排障两例
 
-**19. 任务卡住不动，看日志**
+**19. 转写报错，先看真实原因**
 
-任务页下方「运行日志」实时滚动，能看到当前阶段和真实报错。想看更细的，读 `%LOCALAPPDATA%\Bili Note\logs\app.log`（2 MB 轮转，保留 3 份）。
+```powershell
+.venv\Scripts\python -m app.cli --doctor
+Get-Content "$env:LOCALAPPDATA\Bili Note\logs\app.log" -Tail 50
+```
 
-**20. 端口被占用起不来**
+桌面端还有「运行日志」面板实时滚动，比翻日志文件快。
+
+**20. 端口被占，换一个**
 
 ```powershell
 $env:BILI_PORT = "9000"
 .venv\Scripts\python -m app.main
 ```
 
-或者：程序已经检测到单实例在跑 —— 它会直接把现有窗口打开然后退出，这是正常行为。
-
----
-
+或者：程序检测到已有实例在跑，会直接把现有窗口提到前台然后退出 —— 这是正常的单实例保护。
 ## 命令行参考
 
-安装后在 `Scripts\` 下得到 `bili-transcriber-cli`（源码模式）。打包版没有独立可执行文件，改用分发前缀：
-
-```
-bili-transcriber.exe --cli <同样参数>
-bili-transcriber.exe --mcp          # MCP stdio 服务
-bili-transcriber.exe --mcp-http     # MCP HTTP 服务(streamable-http)
-bili-transcriber.exe --version
-```
-
-`--cli` / `--mcp` 在进入 GUI 之前就被拦下分发，不会启动窗口。
+`bili-transcriber-cli` / `python -m app.cli` 共用同一套参数。打包后的 exe 需要 `--cli` 才进命令行模式。
 
 ### 提交任务
 
@@ -373,7 +372,7 @@ bili-transcriber.exe --version
 | `--device` | `auto` / `cuda` / `cpu` |
 | `--compute-type` | `auto` / `float16` / `int8_float16` / `int8` |
 | `--language` | `zh` / `en` / 省略=自动 |
-| `--notes` / `--no-notes` | 本次是否生成图文讲义 |
+| `--notes` / `--no-notes` | 本次是否生成图文讲义（互斥） |
 | `--json` | 输出机器可读 JSON |
 
 ### 查询与管理
@@ -382,14 +381,14 @@ bili-transcriber.exe --version
 |---|---|
 | `--list` | 列出任务 |
 | `--limit` | 返回条数，默认 20（`--list` / `--grep` 共用） |
-| `--status-filter` | 按状态过滤；支持 `running` 别名（queued/downloading/transcribing…） |
-| `--search` | 关键字过滤标题 |
-| `--grep KEYWORD` | 在已完成任务的**转写稿正文**里全文检索，返回命中任务与上下文片段 |
+| `--status-filter` | 按状态过滤；支持 `running` 别名 |
+| `--search` | 按标题关键字过滤 |
+| `--grep KEYWORD` | 在已完成任务的**转写稿正文**里全文检索 |
 | `--context` | `--grep` 的上下文字符数，默认 240 |
 | `--status MEDIA_ID` | 查单个任务 |
 | `--result MEDIA_ID` | 读取产物文本 |
 | `--format` | `md` / `txt` / `srt` / `notes` |
-| `--max-chars` | 产物截断长度，默认 12000 |
+| `--max-chars` | 产物截断长度，`<=0` 为全文，默认 12000 |
 | `--cancel MEDIA_ID` | 取消任务 |
 
 ### 设置与其他
@@ -397,226 +396,199 @@ bili-transcriber.exe --version
 | 参数 | 说明 |
 |---|---|
 | `--settings` | 打印当前设置 |
-| `--set KEY=VALUE` | 改设置，可重复；非法值直接拒绝 |
-| `--prewarm` | 预加载模型并**等到就绪**才退出（退出码反映是否加载成功） |
+| `--set KEY=VALUE` | 改设置并持久化，可重复；非法值直接拒绝 |
+| `--prewarm` | 预加载模型并等到就绪才退出 |
 | `--mcp` | 以 MCP stdio 服务运行 |
-| `--mcp-http [PORT]` | 以 MCP HTTP 服务运行（streamable-http）；省略端口从 8765 起自动找空位 |
+| `--mcp-http [PORT]` | 以 MCP HTTP 服务运行；省略端口从 8765 起自动找空位 |
 | `--doctor` | AI 接入自检：本机客户端、配置路径、常见错误一次说清 |
-| `--agent-config CLIENT` | 打印某客户端的接入配置（`workbuddy`/`dsh`/`codex`/`claude`/`cursor`/`vscode`/`tare`/`generic`） |
+| `--agent-config CLIENT` | 打印某客户端接入配置（8 种） |
 | `--agent-list` | 列出本机检测到的 AI 客户端与注册状态 |
-| `--transport` | `--agent-config` 的传输方式：`stdio`（默认）/ `http` |
+| `--transport` | `stdio`（默认）/ `http` |
 | `--mcp-port` | `--transport http` 用的端口，默认 8765 |
-| `--write` | `--agent-config` 时把配置写进客户端文件（先备份 `.bak`；DSH 由界面托管，拒绝直写） |
+| `--write` | 把配置写进客户端文件（先备份 `.bak`；DSH 由界面托管，拒绝直写） |
 | `--version` | 显示版本 |
 
-> 输出编码：**被管道/重定向接管时一律 UTF-8**（AI 客户端按 UTF-8 解析不会乱码），留在终端里则沿用控制台代码页，避免 `cmd.exe` 花屏。JSON 里的中文原样输出，不做 ASCII 转义。
-
----
+> 输出编码：被管道/重定向接管时**一律 UTF-8**（AI 客户端按 UTF-8 解析不会乱码），
+> 留在终端里则沿用控制台代码页，避免 `cmd.exe` 花屏。
 
 ## AI 集成（CLI / MCP）
 
-<img src="docs/assets/ai-integration.svg" alt="AI 集成：CLI 与 MCP 两条通道共用同一套服务层" width="100%" />
+<img src="docs/assets/ai-integration.svg" alt="CLI 与 MCP 两条通道共用同一套服务层" width="100%" />
 
 <img src="docs/assets/mcp-channels.svg" alt="一个服务层，三条通道接入任意 AI Agent" width="100%" />
 
 三条通道共用同一个服务层（`app/headless.py`），行为完全一致 —— 只是传输方式不同：
 
-- **CLI** — 脚本、批处理、CI 里调用，参数进 / JSON 出。
-- **MCP stdio** — 能自己拉起子进程的 AI 客户端（WorkBuddy、Codex、Claude Code 等）。
-- **MCP HTTP** — 拉不了子进程的调用方：DSH 的 streamable-http 连接、容器、浏览器内 Agent。
-  `--mcp-http` 启动，只绑 `127.0.0.1`，校验 Origin 防跨站，可选 Bearer token。
+- **CLI** —— 脚本、批处理、CI 里调用，参数进 / JSON 出。
+- **MCP stdio** —— 能自己拉起子进程的客户端（WorkBuddy、Codex、Claude Code 等）。
+- **MCP HTTP** —— 只能连 URL 的客户端；只绑 `127.0.0.1`，带 Origin 白名单与可选 Bearer token。
 
-### 一条命令接入（--agent-config）
+### 一条命令接入（`--agent-config`）
 
 ```powershell
-bili-transcriber-cli --doctor                        # 先自检:装了哪些客户端、缺什么
-bili-transcriber-cli --agent-config workbuddy        # 打印 WorkBuddy 的 mcpServers 片段
-bili-transcriber-cli --agent-config workbuddy --write    # 直接写进 ~/.workbuddy/mcp.json(先备份)
-bili-transcriber-cli --agent-config codex --transport http --write   # Codex 走 HTTP
+bili-transcriber-cli --doctor                          # 自检：装了哪些客户端、缺什么
+bili-transcriber-cli --agent-config workbuddy --write   # 写进 ~/.workbuddy/mcp.json
+bili-transcriber-cli --agent-config codex --transport http --write
 ```
 
-| 客户端 | 配置位置 | 写入 | 说明 |
-|---|---|---|---|
-| WorkBuddy | `~/.workbuddy/mcp.json` | ✅ | stdio；设置页也能复制同一份片段 |
-| DSH | 界面「添加 MCP 连接」 | ❌ 手动粘贴 | 生成 streamable-http 或 stdio 连接条目；连接表由界面托管 |
-| Codex | `~/.codex/config.toml` | ✅ | TOML `[mcp_servers.*]`，含 `startup_timeout_sec` |
-| Claude Code / Desktop | `~/.claude.json` | ✅ | stdio |
-| Cursor | `~/.cursor/mcp.json` | ✅ | stdio |
-| VS Code (Copilot) | `.vscode/mcp.json` | ✅ | 用 `servers` 键；仅 stdio |
-| Tare / 其它 | 按软件说明 | 手动粘贴 | 通用 `mcpServers` 片段 |
+| 客户端 | 自动写入 | 说明 |
+|---|---|---|
+| WorkBuddy | ✅ | JSON `mcpServers`，已有条目原样保留 |
+| DSH | ❌ 手动粘贴 | 连接表由界面托管，**拒绝直写**（写坏会让 DSH 起不来） |
+| Codex | ✅ | TOML，只写文档化键 + `startup_timeout_sec=300` |
+| Claude / Cursor / VS Code / Tare / 通用 | ✅ / 粘贴 | 见 `--agent-list` |
 
-> 写入只动 `bili-transcriber` 这一个条目，你已有的其它 MCP 服务原样保留；写前自动备份 `.bak`。
+写入前自动备份 `.bak`，只动 `bili-transcriber` 一个条目。
 
 ### MCP 的 11 个工具
 
 | 工具 | 作用 |
 |---|---|
-| `transcribe` | 提交转写任务（可设 `wait=true` 直接等结果） |
-| `wait_jobs` | 等待指定任务到终态 |
-| `job_status` | 查单个任务状态 |
-| `list_jobs` | 列出任务（支持 `running` 别名与关键字） |
-| `get_transcript` | 取产物文本（可指定格式与截断长度） |
-| `search_transcript` | 在已完成任务的转写稿里**全文检索**，返回命中任务与上下文 |
-| `check_network` | 只读检测本机网络与登录 Cookie（`quick`/`full`/`test` 三档，不改配置） |
+| `transcribe` | 提交转写任务（链接或本地文件） |
+| `wait_jobs` | 等一批任务完成（超时夹紧 86400 秒） |
+| `job_status` | 查单个任务状态与进度 |
+| `list_jobs` | 列任务 |
+| `get_transcript` | 取产物文本（md / txt / srt / notes） |
+| `search_transcript` | 在转写稿正文里全文检索 |
+| `check_network` | 网络与 Cookie 只读体检（quick / full / test） |
 | `cancel_job` | 取消任务 |
-| `prewarm_model` | 预加载模型（`wait=true` 时阻塞到就绪） |
-| `get_settings` | 读当前设置 |
-| `update_settings` | 改设置（白名单校验 + 类型强转，坏值不落盘） |
+| `prewarm_model` | 预加载模型 |
+| `get_settings` | 读设置 |
+| `update_settings` | 改设置（通道开关不可改） |
 
-细节见 [`docs/ai-integration.md`](docs/ai-integration.md)。
+`check_network` 的 `test` 档会**读你当前设置**（浏览器 Cookie / cookies.txt / 代理）逐平台实测，
+所以 AI 拿到的结论和你在设置页点「测试连接」是同一个。
 
 ### 通道开关（设置页可关）
 
-设置页有一节「AI 调用与命令行」，两个开关默认都开：
+设置页「AI 调用与命令行」两个开关落盘。关掉后：
 
-| 开关 | 关掉之后 |
-|---|---|
-| 允许命令行（CLI）调用 | `--cli` / `bili-transcriber-cli` 直接返回 `{"ok": false, "error": "…已在桌面端「设置」中关闭"}`,退出码 **3** |
-| 允许 MCP 调用 | `--mcp` 与 `--mcp-http` 都不启动，原因写 stderr（`--mcp` 退出码 1，stdout 保持干净） |
+- `--cli` / `bili-transcriber-cli` 立即退出，退出码 3；
+- `--mcp` / `--mcp-http` 写一条 stderr 并返回 1，stdout 保持空（不污染协议）。
 
-- **只影响新进程**：已经连上的 MCP 客户端需要重连才生效；桌面端本身始终可用。
-- **只能从桌面端改**：`update_settings` / `--set` 都不接受这两个键 —— 被提示注入的 AI 没法给自己开门。
-- **重新开启**：勾选后点「保存设置」；或直接把 `data/settings.json` 里 `enable_cli` / `enable_mcp` 改成 `true`。
-- 同一节里还有「MCP 客户端配置」折叠面板，展开后是可复制的 `mcpServers` 片段，命令路径按当前形态自动填（打包版填 `xxx.exe --mcp`，源码模式填 `python -m app.mcp_server`）。
-
----
-
+门禁在构造服务层**之前**判断，不白占 SQLite 锁。
 ## 输出结构
 
-```
-{输出目录}/{平台ID}_{标题}/
-├── {标题}.srt              # 带时间戳字幕，可直接导入剪辑软件
-├── {标题}.txt              # 纯文本稿
-├── {标题}.md               # 带时间戳的 Markdown
-├── {标题}.m4a              # 原始音频（设置可关）
-├── {标题}.notes.md         # 图文讲义（开启后生成）
-└── {标题}_frames/slide_*.jpg  # 讲义关键帧（移动时需与 notes.md 一起）
+一次 B 站任务（`BV1xx411c7mD`，标题「分布式共识入门」）在输出目录里长这样：
+
+```text
+分布式共识入门.md            ← 带元信息与时间戳的正文（推荐阅读）
+分布式共识入门.txt           ← 纯文本，喂给 AI 最省 token
+分布式共识入门.srt           ← 标准字幕，可直接给播放器
+分布式共识入门.notes.md      ← 只有开了「图文讲义」才有
+分布式共识入门_frames\       ← 讲义配图（slide_001.jpg …）
 ```
 
-落盘是原子写（先写 `.tmp` 再 `os.replace`），带权限冲突重试 —— 不会留下半截文件。
+`.md` 的头部是这样的：
 
----
+```markdown
+# 分布式共识入门
+
+- 平台：B 站
+- UP 主：某某某
+- 时长：42:17
+- 来源：https://www.bilibili.com/video/BV1xx411c7mD
+- 引擎：whisper large-v3-turbo
+- 生成时间：2026-10-29 21:40
+
+## 正文
+
+[00:00] 大家好，今天聊分布式共识……
+[00:12] 先从两阶段提交说起……
+```
+
+字幕与正文都是**逐段**的：一段一个时间戳，拖动与引用都按段走。
+
+## Cookie 与网络（国内网络必读）
+
+### Chrome 127+ / Edge 的 Cookie 是「应用绑定加密」
+
+Chrome 127 起把 Cookie 换成了 **App-Bound Encryption（v20）**：密钥由浏览器的 elevation 服务包裹，
+**只有浏览器本体、在原始配置路径上**才能解开。第三方解密实现（yt-dlp 等）只认老的 v10，
+遇到 v20 一律报解密失败。
+
+本程序的做法是让浏览器自己解密：
+
+- 复制 `Local State` + Cookie 库到临时目录，起一个**无窗口临时实例**（用完立即杀掉、目录删掉），
+  经调试协议取回明文；你的浏览器窗口不受影响。
+- **下载**时把明文落成一份临时 `cookies.txt` 交给 yt-dlp（10 分钟内复用缓存），
+  这样"测试通过"和"下载成功"才是同一件事。
+
+| 你会看到 | 含义 | 该做什么 |
+|---|---|---|
+| 绿点「已登录」+「值加密读不到」 | 登录态在，但这台机器上值取不出 | 关掉浏览器再点「测试连接」；或点「导出」走 cookies.txt |
+| 锁图标「读取失败」 | Cookie 库被独占，连名字/有效期都读不到 | 关掉浏览器重测，或改用 cookies.txt |
+| 「配置文件不存在」 | `cookie_file` 填的路径错了 | 改路径，或清空改用浏览器 Cookie |
+
+> 实测：Chrome 运行时 Cookie 库在 Windows 上**完全不可复制**（`PermissionError 32`，
+> 30 秒 60 次尝试全失败）。这不是程序卡住，是 Chrome 的安全设计 —— 关掉浏览器一次就成。
+
+### 国内网络适配
+
+| 问题 | 现象 | 本程序的处理 |
+|---|---|---|
+| HuggingFace 访问慢/失败 | 模型下载卡住 | 走 `hf-mirror` 镜像；SSL 证书异常时自愈重试 |
+| 系统代理劫持回环 | `127.0.0.1` 的请求被代理出去 | 内部 urllib 一律 `ProxyHandler({})`，绝不走代理 |
+| CUDA 轮子装不上 | `pip install` 报找不到 | 发布流程注入 CUDA 轮子源 |
+| 境外平台不通 | YouTube 一直超时 | 设置页「探测」自动找本机代理端口并验证 |
 
 ## 常见问题
 
-**Q1 下载 / 解析失败？**
-平台接口常变，先升级下载器：`pip install -U yt-dlp`。
+**Q：双击后开了浏览器而不是独立窗口？**
+初次启动要导入 torch/transformers（10~20 秒），期间没窗口会让人以为没反应，再双击就进了"已有实例"分支。
+现在默认走原生窗口，并在后台唤回；要强制浏览器界面设 `BILI_FORCE_BROWSER=1`。
 
-**Q2 抖音 / YouTube 提示需要登录？**
-设置页点「一键检测本机网络与 Cookie」，它会扫出你浏览器里的登录态和本机代理并自动填好；
-再点「② 测试连接」确认可用，最后保存。YouTube 另需代理（同一按钮会自动探测可用端口）。
+**Q：开着几分钟自己退出了？**
+旧版本（≤0.1.40）的已知问题：pywebview 的临时目录被回收导致渲染进程崩溃。0.1.41 起固定 WebView2 数据目录，已修。
 
-**Q3 转写很慢？**
-确认设备 `auto`/`cuda` 且装了 GPU 包；首次要下 1.6 GB 模型；Qwen 1.7B 在 CPU 上是 0.6B 的 3 倍耗时。
+**Q：B 站只能下 480P？**
+B 站高清需要登录态。配浏览器 Cookie 或 cookies.txt（见上一节）。
 
-**Q4 CUDA out of memory？**
-精度改 `int8`，或换小模型（`medium` / `Qwen3-ASR-0.6B`）。
+**Q：转写很慢？**
+先确认真的用上了 GPU：设置页把「设备」设 `cuda`，跑 `--doctor` 看设备探测。
+CPU 上 large-v3-turbo 大约慢 3~10 倍；换 `small` 或 SenseVoice 明显更快。
 
-**Q5 唱歌 / 纯音乐没有字幕？**
-VAD 只识人声。程序会自动关 VAD 重试一次；仍为空说明确实没人声。
+**Q：多 P 合集里某一 P 失败，会全部重来吗？**
+不会。每条独立状态，失败条目单独重试；已完成的不再下载。
 
-**Q6 「检测模型」提示缺失文件？**
-模型包不完整，删掉该目录让程序重新下载。
+**Q：产物在哪？**
+设置里的「输出目录」。源码模式默认 `output/`；安装版建议指到自己的盘。
 
-**Q7 端口被占用？**
-`BILI_PORT=9000` 换端口。重复双击只会把已有窗口提到前台，那是单实例保护，不是故障。
+**Q：能不能只装命令行，不装界面？**
+可以。`pip install bili_transcriber-*.whl` 后直接用 `bili-transcriber-cli`；
+或用 MCP 让 AI 代劳。
 
-**Q8 关了窗口任务还在跑吗？**
-原生窗口模式下关窗即退出程序（未完成的任务下次启动会续跑）。想让界面消失但继续跑，最小化到托盘即可；托盘图标可唤回窗口。
-
-**Q8.1 窗口开不出来 / 一开就没了？**
-设 `BILI_FORCE_BROWSER=1` 用浏览器界面，功能完全一样。
-
-**Q9 能同时跑多个任务吗？**
-能。下载 / 转码并发（默认 2 路），**转写串行** —— 避免多个任务抢同一块显存导致 OOM。
-
-**Q10 重跑会重新下载吗？**
-不会。音频与 WAV 缓存命中即跳过，除非手动删了中间产物。
-
-**Q11 微信视频号链接能转吗？**
-不能直链解析。程序会主动拦截并提示改用「本地上传」——先自己把视频存下来，再选文件转写。
-
-**Q12 Python 脚本连 `--mcp-http` 一直超时？**
-大概率是系统代理把 `127.0.0.1` 的请求也代理出去了（Clash 等常见）。Python `urllib` 用 `ProxyHandler({})` 禁代理，或给进程设 `no_proxy=127.0.0.1,localhost`；curl 加 `--noproxy "*"`。Node / Go 客户端默认不受影响。
-
----
+**Q：数据会上传吗？**
+不会。唯一的外部请求是"下载视频/音频"和"下载模型"。日志、历史、产物都在本机。
 
 ## 数据与隐私
 
-**全程本地**：下载、转码、转写都不调用外部 AI API，字幕内容不离开你的机器。
+| 数据 | 位置 | 说明 |
+|---|---|---|
+| 设置 | `data/settings.json` | 输出目录、引擎、Cookie 来源、代理等 |
+| 历史 | `data/history.db` | SQLite，主键为媒体 ID |
+| 模型 | `%LOCALAPPDATA%\Bili Note\models` | 安装版无写权限，故放用户目录 |
+| 日志 | `%LOCALAPPDATA%\Bili Note\logs\app.log` | 2 MB 轮转，保留 3 份 |
+| 产物 | 设置里的 output_dir | 音频（若保留）、字幕、文本、讲义图 |
+| 导出的 cookies.txt | `data/cookies.txt` | **含登录凭据**，不要分享或提交 |
 
-只有两类网络访问：
-
-1. **首次模型下载** — 走 `hf-mirror.com` 国内镜像（需官方源设 `HF_ENDPOINT=https://huggingface.co`）。
-2. **视频本身** — 从公开平台获取，和你用浏览器看视频是同一件事。
-
-本地存储位置：
-
-| 内容 | 路径 |
-|---|---|
-| 设置 | `data/settings.json` |
-| 历史索引 | `data/history.db`（SQLite） |
-| 日志 | `%LOCALAPPDATA%\Bili Note\logs\app.log`（轮转） |
-| 模型 | `%LOCALAPPDATA%\Bili Note\models` |
-| 产物 | 设置里的输出目录 |
-
----
+> Cookie 只在下载那一刻交给 yt-dlp，不进日志、不打包、不发往任何第三方。
+> 通道开关落盘不可被 CLI/MCP 修改 —— 防止被提示注入的 AI 自行打开通道。
 
 ## 开发与测试
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\pip install -e .
-.venv\Scripts\pytest -q                    # 当前 525 passed
-.venv\Scripts\python -m app.main           # 开发运行
+.venv\Scripts\python.exe -m pytest tests/ -q      # 全量 544 passed
+.venv\Scripts\python.exe -m app.cli --doctor      # 自检
+.venv\Scripts\python.exe scripts\release.py       # 一键发布（自动 bump 版本 + 手册快照）
 ```
 
-测试分成三档：单元（store / writers / downloader）、编排（pipeline，注入 Fake 边界）、UI（NiceGUI `user_plugin`）。另有打包冒烟脚本在 `build/smoke_*.py`。AI 接入层的对抗性审查记录见 [`docs/adversarial-review.md`](docs/adversarial-review.md)。
+- **动手前读** [CLAUDE.md](CLAUDE.md)：发布流程的四个必炸坑、质量基线、冻结版分发开关。
+- **架构与模块** [docs/technical-manual-zh.md](docs/technical-manual-zh.md)。
+- **用户手册** [docs/user-guide-zh.md](docs/user-guide-zh.md)（英文版 `-en`）。
+- **AI 接入细节** [docs/ai-integration.md](docs/ai-integration.md)。
+- **对抗性审查清单与方法论** [docs/adversarial-review.md](docs/adversarial-review.md)。
 
-### 打包发布
+## 许可
 
-```powershell
-python scripts/release.py                # 一键：bump 版本 → wheel → 便携 → 安装包 → 单文件 → GPU 包
-python scripts/release.py --wheel-only   # 快速交付
-```
-
-版本号单一来源是 `pyproject.toml`；`release.py` 自动同步 `app/__init__.py`、`build/installer.iss`、四份手册头部声明，并生成带版本后缀的手册快照。
-
-五个产物：
-
-| 产物 | 输出 |
-|---|---|
-| Wheel | `dist/bili_transcriber-{ver}-py3-none-any.whl` |
-| 便携包 | `dist/bili-transcriber-portable-{ver}.zip` |
-| 安装包 | `dist/bili-transcriber-setup-{ver}.exe` |
-| 单文件版 | `dist/bili-transcriber-single-{ver}.exe` |
-| GPU 加速包 | `dist/bili-transcriber-gpu-{ver}.zip` |
-
----
-
-## 文档
-
-| 文档 | 适合谁 |
-|---|---|
-| [用户手册（中文）](docs/user-guide-zh.md) · [English](docs/user-guide-en.md) | 使用者：安装、使用、设置、FAQ |
-| [技术手册（中文）](docs/technical-manual-zh.md) · [English](docs/technical-manual-en.md) | 开发者：架构、线程模型、模块职责、打包坑位 |
-| [AI 集成](docs/ai-integration.md) | CLI / MCP 参数、返回结构、故障排查 |
-
----
-
-## 配套 AI 技能（可选）
-
-转写只解决「视频 → 文字」。后续的知识化加工由配套的通用 AI 技能完成（开源：[Asaceoo/bili-note-skills](https://github.com/Asaceoo/bili-note-skills)）：
-
-| 技能 | 作用 |
-|---|---|
-| `bili-note` | 抓 B 站字幕 / AI 字幕 / 评论，归档原始材料与证据索引 |
-| `bili-content-enhance` | 把转录稿增强为 6 类学习物料（摘要 / 术语表 / 知识导图 / 动画 HTML / 补充知识 / 深度理解） |
-
-两个技能**不绑定任何 AI 智能体** —— Claude Code、Cursor、Codex CLI、WorkBuddy、Cline、Gemini CLI 都能用；不支持技能目录的助手把 `SKILL.md` 当系统提示词即可。
-
----
-
-## 许可证
-
-见 [LICENSE](LICENSE)。
+MIT —— 见 [LICENSE](LICENSE)。

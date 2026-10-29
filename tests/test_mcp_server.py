@@ -391,18 +391,46 @@ def test_check_network_full_includes_browser_scan(server, monkeypatch):
 
 
 def test_check_network_test_mode(server, monkeypatch):
+    """test 档必须真的读用户设置并传下去 —— 否则永远只能拿到「未配置 Cookie」。"""
     from app import netcheck as nc
     from app.netcheck import PlatformTest, TestReport
 
-    monkeypatch.setattr(nc, "test_configuration", lambda timeout=4.0: TestReport(
-        items=[PlatformTest(platform="bilibili", network_ok=True, ms=88,
-                            cookie_state="verified", detail="d")],
-        source="cookie_file", summary="OK", warnings=[], ok=True))
+    seen = {}
+
+    def fake_test_configuration(browser="", cookie_file="", proxy="", timeout=4.0):
+        seen.update(browser=browser, cookie_file=cookie_file, proxy=proxy, timeout=timeout)
+        return TestReport(
+            items=[PlatformTest(platform="bilibili", network_ok=True, ms=88,
+                                cookie_state="verified", detail="d")],
+            source="cookie_file", summary="OK", warnings=[], ok=True)
+
+    monkeypatch.setattr(nc, "test_configuration", fake_test_configuration)
+    monkeypatch.setattr(server.service, "get_settings", lambda: {
+        "cookies_from_browser": "edge", "cookie_file": "D:/x/cookies.txt",
+        "proxy": "http://127.0.0.1:7890"})
     resp = server.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                           "params": {"name": "check_network",
                                      "arguments": {"mode": "test"}}})
     sc = resp["result"]["structuredContent"]
     assert sc["ok"] is True and sc["platforms"][0]["ms"] == 88
+    # 设置必须一路传到 test_configuration(这是「按当前配置实测」的全部意义)
+    assert seen == {"browser": "edge", "cookie_file": "D:/x/cookies.txt",
+                    "proxy": "http://127.0.0.1:7890", "timeout": 4.0}
+
+
+def test_check_network_mode_is_stripped(server, monkeypatch):
+    """" test " 与 "TEST" 必须等价:只 lower 不 strip 会让行为不可预测。"""
+    from app import netcheck as nc
+    from app.netcheck import TestReport
+
+    monkeypatch.setattr(nc, "test_configuration",
+                        lambda *a, **k: TestReport(source="s", summary="m", ok=True))
+    monkeypatch.setattr(server.service, "get_settings", lambda: {})
+    for raw in ("test", "TEST", " Test ", "  test  "):
+        resp = server.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                              "params": {"name": "check_network",
+                                         "arguments": {"mode": raw}}})
+        assert resp["result"]["structuredContent"]["mode"] == "test", raw
 
 
 def test_check_network_timeout_is_clamped(server, monkeypatch):

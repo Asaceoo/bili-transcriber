@@ -655,15 +655,23 @@ def main_page() -> None:
                             ui.notify("请先在上面选择要导出的浏览器", type="warning")
                             return
                         dest = DATA_DIR / "cookies.txt"
+                        export_btn.set_text("导出中…")
+                        export_btn.props("disable")
                         try:
                             path = await run.io_bound(
                                 netcheck.export_browser_cookies, browser, dest)
                         except netcheck.NetcheckError as exc:
-                            ui.notify(str(exc), type="negative", timeout=6000)
+                            # 占用时给出唯一真能通的动作:关掉浏览器再点一次
+                            ui.notify(str(exc), type="negative", timeout=8000)
                             return
+                        finally:
+                            export_btn.set_text("从浏览器导出 cookies.txt")
+                            export_btn.props(remove="disable")
                         cookie_input.set_value(str(path))
-                        ui.notify(f"已导出到 {path}(内含登录凭据,请勿分享)", type="positive",
-                                  timeout=6000)
+                        ui.notify(f"已导出到 {path}(内含登录凭据,请勿分享);"
+                                  f"下一步点「③ 保存设置」再「测试连接」即可",
+                                  type="positive", timeout=6000)
+                        _set_step(2)
 
                     browser_select = ui.select(
                         {"": "不使用", "chrome": "Chrome", "edge": "Edge", "firefox": "Firefox",
@@ -716,14 +724,17 @@ def main_page() -> None:
                     with ui.expansion("三种 Cookie 来源怎么选?", icon="source").classes("w-full"):
                         ui.markdown(
                             "1. **浏览器 Cookie(最省事)**:软件直接读你浏览器里的登录态。\n"
-                            "   缺点:浏览器**正在运行**时 Cookie 库被独占锁定,读不到也下载不了带 Cookie 的内容。\n"
+                            "   缺点:浏览器**正在运行**时 Cookie 库被独占锁定,读不到也下载不了带 Cookie 的内容;"
+                            "Chrome 127+ 的 Cookie 还用了应用绑定加密,只有浏览器本体能解(本程序会临时起一个"
+                            "无窗口实例让浏览器自己解密,用完即删)。\n"
                             "2. **cookies.txt(最稳)**:优先于浏览器 Cookie,不受浏览器开关影响;"
                             "可用下面的「导出」按钮生成。\n"
                             "3. **都不用**:只下载公开内容,B 站普通视频足够。\n\n"
                             "> 提示:导出文件内含登录凭据,只存在本机 `data/` 目录,不要发给别人。"
                         )
-                        ui.button("从浏览器导出 cookies.txt", icon="download",
-                                  on_click=lambda: _export_cookies()).props("flat dense no-caps")
+                        export_btn = ui.button("从浏览器导出 cookies.txt", icon="download",
+                                               on_click=lambda: _export_cookies()) \
+                            .props("flat dense no-caps")
                     with ui.expansion("检测结果 / 测试结果怎么看?", icon="fact_check") \
                             .classes("w-full"):
                         ui.markdown(
@@ -733,7 +744,10 @@ def main_page() -> None:
                             "- **已登录(已校验)**:用 B 站接口真实核对了账号,最可靠。\n"
                             "- **已登录**:只确认 Cookie 存在,没做在线校验(抖音/小红书接口需签名)。\n"
                             "- **读取失败(锁图标)**:浏览器正在运行,Cookie 库被占用 → 关掉浏览器再测,"
-                            "或改用 cookies.txt。"
+                            "或改用 cookies.txt。\n"
+                            "- **Chrome 127+/Edge 的 Cookie 是应用绑定加密(v20)**:密钥只有浏览器本体在"
+                            "**原始配置路径**上能解,关掉浏览器后测试可正常读出;开着浏览器时值读不到,"
+                            "但登录态(名字/有效期)仍会如实显示。"
                         )
                     with ui.expansion("下载失败的常见原因", icon="build").classes("w-full"):
                         ui.markdown(
