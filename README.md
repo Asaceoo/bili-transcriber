@@ -15,7 +15,7 @@
 
 </div>
 
-> 本 README 对应 **v0.1.43** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
+> 本 README 对应 **v0.1.44** — 版本号取自 `pyproject.toml` 单一来源，发布时由 `scripts/release.py` 自动递增。
 
 ---
 

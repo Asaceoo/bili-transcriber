@@ -1,8 +1,8 @@
 # bili-transcriber — User Guide (English)
 
 > For end users. Covers installation, the three tabs, every setting, output layout, and troubleshooting.
-> This guide matches **v0.1.43** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
-> The versioned release copy is [user-guide-en-0.1.43.md](user-guide-en-0.1.43.md).
+> This guide matches **v0.1.44** — the version comes from `pyproject.toml` as the single source of truth and is bumped automatically on release.
+> The versioned release copy is [user-guide-en-0.1.44.md](user-guide-en-0.1.44.md).
 
 ---
 
