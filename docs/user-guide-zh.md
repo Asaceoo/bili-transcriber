@@ -1,8 +1,8 @@
 # bili-transcriber 用户手册（中文）
 
 > 面向使用者。讲清安装、界面、设置、输出与排障。
-> 本手册对应 **v0.1.42** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
-> 带版本号的发布快照见 [user-guide-zh-0.1.42.md](user-guide-zh-0.1.42.md)。
+> 本手册对应 **v0.1.43** — 版本号取自 `pyproject.toml` 单一来源，发布时自动递增。
+> 带版本号的发布快照见 [user-guide-zh-0.1.43.md](user-guide-zh-0.1.43.md)。
 
 ---
 
